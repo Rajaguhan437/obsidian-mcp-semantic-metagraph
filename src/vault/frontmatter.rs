@@ -65,6 +65,16 @@ pub fn parse_frontmatter(content: &str) -> VaultResult<Option<serde_json::Value>
     let value: serde_json::Value = serde_yaml::from_str(yaml_str)
         .map_err(|e| VaultError::Other(format!("Frontmatter YAML parse error: {e}")))?;
 
+    // Degrade instead of dropping the note. A block like "---\n\n## title: x"
+    // is a YAML comment, so it parses to null; upstream turned that into a hard
+    // error and the ENTIRE note vanished from both the BM25 and semantic
+    // indexes. 10 of 416 notes in a real vault hit this. Treat any non-mapping
+    // frontmatter as empty and keep the note searchable.
+    if !matches!(&value, serde_json::Value::Object(_)) {
+        tracing::warn!("frontmatter is not a YAML mapping; treating as empty");
+        return Ok(Some(serde_json::Value::Object(serde_json::Map::new())));
+    }
+
     match &value {
         serde_json::Value::Object(_) => Ok(Some(value)),
         other => Err(VaultError::Other(format!(
@@ -315,15 +325,17 @@ mod tests {
     #[test]
     fn parse_non_mapping_yaml_array() {
         let content = "---\n- a\n- b\n---\nbody";
-        let err = parse_frontmatter(content).unwrap_err();
-        assert!(err.to_string().contains("array"));
+        // Non-mapping frontmatter degrades to an empty mapping so the note
+        // stays indexed, instead of erroring and dropping the note entirely.
+        let value = parse_frontmatter(content).expect("array frontmatter should degrade");
+        assert_eq!(value, Some(serde_json::Value::Object(serde_json::Map::new())));
     }
 
     #[test]
     fn parse_non_mapping_yaml_scalar() {
         let content = "---\njust a string\n---\nbody";
-        let err = parse_frontmatter(content).unwrap_err();
-        assert!(err.to_string().contains("string"));
+        let value = parse_frontmatter(content).expect("scalar frontmatter should degrade");
+        assert_eq!(value, Some(serde_json::Value::Object(serde_json::Map::new())));
     }
 
     // ── extract_frontmatter_tags ─────────────────────────────────────

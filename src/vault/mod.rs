@@ -3,6 +3,7 @@
 //! Knows nothing about MCP; provides the data model and I/O primitives
 //! that tool handlers delegate to.
 
+pub mod chunker;
 pub mod exclude;
 pub mod frontmatter;
 pub mod fs;

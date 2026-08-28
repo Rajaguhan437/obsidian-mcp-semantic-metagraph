@@ -16,7 +16,7 @@ use crate::error::{VaultError, VaultResult};
 
 use super::embeddings::{
     Embedder, EmbeddingStore, LegacyCacheMigration, migrate_cache_candidates_to_path,
-    prepare_embed_text, prepared_text_hash, validate_embedding_batch,
+    prepared_text_hash, validate_embedding_batch,
 };
 use super::index::VaultIndex;
 
@@ -143,7 +143,9 @@ pub(crate) struct EmbeddingQuerySnapshot {
 
 impl EmbeddingQuerySnapshot {
     pub(crate) fn embed_query(&self, query: &str) -> VaultResult<Vec<f32>> {
-        let mut vectors = self.model.embed_batch(&[query])?;
+        // Asymmetric models (Arctic, E5, Nomic) need a query-side prefix.
+        let prefixed = format!("{}{}", super::embeddings::query_prefix(), query);
+        let mut vectors = self.model.embed_batch(&[prefixed.as_str()])?;
         vectors
             .pop()
             .ok_or_else(|| VaultError::Embedding("embedding query returned no vector".into()))
@@ -685,18 +687,21 @@ async fn process_batch(
             }
             PreparedWork::Upsert {
                 work,
-                text,
+                chunks,
                 content_hash,
             } => {
+                // All chunks of a note share one hash; probing chunk 0 is
+                // sufficient because they are always written together.
+                let probe = super::embeddings::chunk_key(&work.path, 0);
                 let unchanged = store
                     .read()
                     .unwrap_or_else(|error| error.into_inner())
-                    .content_hash(&work.path)
+                    .content_hash(&probe)
                     .is_some_and(|cached| cached == &content_hash);
                 if unchanged {
                     mark_success(shared, &work);
                 } else {
-                    changed.push((work, text, content_hash));
+                    changed.push((work, chunks, content_hash));
                 }
             }
         }
@@ -712,13 +717,17 @@ async fn process_batch(
         .map(|(work, _, _)| work.clone())
         .collect::<Vec<_>>();
     let inference = tokio::task::spawn_blocking(move || {
+        let doc_prefix = super::embeddings::document_prefix();
+        // Flatten every chunk of every note in this batch into one list, then
+        // send it to the provider in bounded sub-batches. A 32-note batch can
+        // be several hundred chunks; posting them in a single request is what
+        // overruns a local Ollama runner.
         let texts = changed
             .iter()
-            .map(|(_, text, _)| text.as_str())
+            .flat_map(|(_, chunks, _)| chunks.iter())
+            .map(|(_, text)| format!("{doc_prefix}{text}"))
             .collect::<Vec<_>>();
-        let result = embedder.embed_batch(&texts).and_then(|vectors| {
-            validate_embedding_batch(vectors, texts.len(), embedder.dimension())
-        });
+        let result = embed_in_sub_batches(embedder.as_ref(), &texts);
         (changed, result)
     })
     .await;
@@ -741,10 +750,73 @@ async fn process_batch(
         }
     };
 
-    for ((work, _, content_hash), vector) in changed.into_iter().zip(vectors) {
-        dirty |= commit_upsert(shared, store, &work, content_hash, vector);
+    let mut cursor = 0usize;
+    for (work, chunks, content_hash) in changed.into_iter() {
+        let count = chunks.len();
+        if cursor + count > vectors.len() {
+            requeue_failure(
+                shared,
+                work,
+                "embedding provider returned fewer vectors than chunks".to_string(),
+            );
+            continue;
+        }
+        let slice = vectors[cursor..cursor + count].to_vec();
+        cursor += count;
+        let keys = chunks.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        dirty |= commit_upsert_chunks(shared, store, &work, content_hash, keys, slice);
     }
     dirty
+}
+
+/// Embed `texts` in bounded sub-batches with retry.
+///
+/// Size via `OBSIDIAN_EMBED_BATCH` (default 16). Each sub-batch is retried with
+/// exponential backoff so a transient Ollama failure - a dropped runner, a
+/// 429, a timeout - costs one retry instead of the whole reindex.
+fn embed_in_sub_batches(model: &dyn Embedder, texts: &[String]) -> VaultResult<Vec<Vec<f32>>> {
+    const MAX_ATTEMPTS: u32 = 4;
+    let size = std::env::var("OBSIDIAN_EMBED_BATCH")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(16);
+
+    let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for group in texts.chunks(size) {
+        let refs = group.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut last_error: Option<VaultError> = None;
+        let mut done = false;
+        for attempt in 0..MAX_ATTEMPTS {
+            match model
+                .embed_batch(&refs)
+                .and_then(|vectors| validate_embedding_batch(vectors, refs.len(), model.dimension()))
+            {
+                Ok(vectors) => {
+                    out.extend(vectors);
+                    done = true;
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        batch = refs.len(),
+                        "embedding sub-batch failed, retrying"
+                    );
+                    last_error = Some(error);
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        std::thread::sleep(Duration::from_millis(500u64 << attempt));
+                    }
+                }
+            }
+        }
+        if !done {
+            return Err(last_error.unwrap_or_else(|| {
+                VaultError::Embedding("embedding sub-batch failed with no error".into())
+            }));
+        }
+    }
+    Ok(out)
 }
 
 enum PreparedWork {
@@ -752,7 +824,9 @@ enum PreparedWork {
     Failed(PendingWork, String),
     Upsert {
         work: PendingWork,
-        text: String,
+        /// (store key, text to embed) for every chunk of this note.
+        chunks: Vec<(PathBuf, String)>,
+        /// Hash of the FULL body + chunk config, shared by all chunks.
         content_hash: [u8; 32],
     },
 }
@@ -786,20 +860,37 @@ fn prepare_batch(
             };
             match super::fs::read_file(vault_root, &work.path) {
                 Ok(content) => {
-                    let headings = metadata
-                        .headings
-                        .iter()
-                        .map(|heading| heading.text.clone())
-                        .collect::<Vec<_>>();
-                    let text = prepare_embed_text(
-                        &metadata.title,
-                        &headings,
-                        super::frontmatter::get_body(&content),
+                    let body = super::frontmatter::get_body(&content);
+                    let config = super::chunker::ChunkConfig::from_env();
+                    let pieces = super::chunker::chunk_note(body, config);
+                    if pieces.is_empty() {
+                        return PreparedWork::Remove(work);
+                    }
+                    // Hash the FULL body plus the chunk config. Upstream hashed
+                    // the already-truncated embed text, so any edit past word
+                    // 400 left the hash unchanged and the note was silently
+                    // never re-embedded.
+                    let hash_input = format!(
+                        "{}|{}|{}|{}",
+                        metadata.title, config.target, config.overlap, body
                     );
-                    let content_hash = prepared_text_hash(&text);
+                    let content_hash = prepared_text_hash(&hash_input);
+                    let chunks = pieces
+                        .iter()
+                        .map(|piece| {
+                            (
+                                super::embeddings::chunk_key(&work.path, piece.index),
+                                super::chunker::prepare_chunk_embed_text(
+                                    &metadata.title,
+                                    &piece.breadcrumb,
+                                    &piece.text,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     PreparedWork::Upsert {
                         work,
-                        text,
+                        chunks,
                         content_hash,
                     }
                 }
@@ -833,9 +924,69 @@ fn commit_remove(
     let removed = store
         .write()
         .unwrap_or_else(|error| error.into_inner())
-        .remove(&work.path);
+        .remove_note(&work.path);
     finish_success(&mut state, work);
     removed
+}
+
+/// Commit every chunk of one note atomically.
+///
+/// Old chunks are dropped first so a note that shrinks cannot leave orphaned
+/// vectors behind (upstream's one-vector-per-note store could not have this
+/// problem, so there was nothing equivalent to port).
+#[allow(clippy::too_many_arguments)]
+fn commit_upsert_chunks(
+    shared: &RuntimeShared,
+    store: &Arc<RwLock<EmbeddingStore>>,
+    work: &PendingWork,
+    content_hash: [u8; 32],
+    keys: Vec<PathBuf>,
+    vectors: Vec<Vec<f32>>,
+) -> bool {
+    let _lifecycle_guard = shared
+        .lifecycle_gate
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !shared.live.load(Ordering::Acquire) {
+        return false;
+    }
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if state_generation(&state, &work.path) != Some(work.generation) {
+        state.inflight.remove(&work.path);
+        update_pending_status(&mut state);
+        return false;
+    }
+
+    let outcome = {
+        let mut guard = store.write().unwrap_or_else(|error| error.into_inner());
+        guard.remove_note(&work.path);
+        let mut failure = None;
+        for (key, vector) in keys.into_iter().zip(vectors) {
+            if let Err(error) = guard.insert_hashed(key, content_hash, vector) {
+                failure = Some(error);
+                break;
+            }
+        }
+        failure
+    };
+
+    match outcome {
+        None => {
+            finish_success(&mut state, work);
+            if state.reconciliation_complete && !state.store_queryable {
+                state.store_queryable = true;
+            }
+            true
+        }
+        Some(error) => {
+            drop(state);
+            requeue_failure(shared, work.clone(), error.to_string());
+            false
+        }
+    }
 }
 
 fn commit_upsert(
@@ -987,7 +1138,7 @@ fn refresh_status(shared: &RuntimeShared, store: &Arc<RwLock<EmbeddingStore>>) {
         let store = store.read().unwrap_or_else(|error| error.into_inner());
         paths
             .iter()
-            .filter(|path| store.get(path).is_some())
+            .filter(|path| store.has_note(path))
             .count()
     };
     let mut state = shared
@@ -1040,7 +1191,7 @@ fn status_for_current_paths(
         let store = store.read().unwrap_or_else(|error| error.into_inner());
         paths
             .iter()
-            .filter(|path| store.get(path).is_some())
+            .filter(|path| store.has_note(path))
             .count()
     });
     status_for_loaded_state(state, paths.len(), indexed_notes)
@@ -1137,6 +1288,7 @@ fn not_ready_message(status: &EmbeddingRuntimeStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::vault::embeddings::prepare_embed_text;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use super::*;

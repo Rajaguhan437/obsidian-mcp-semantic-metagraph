@@ -21,10 +21,56 @@ use sha2::{Digest, Sha256};
 
 const CACHE_MAGIC: [u8; 8] = *b"OBSMCPEM";
 const CACHE_SCHEMA_VERSION: u16 = 1;
-pub(crate) const EMBEDDING_INPUT_VERSION: u16 = 1;
+// v2: chunk-level embedding text (see vault::chunker). Bumping this
+// invalidates every v1 whole-note cache automatically.
+pub(crate) const EMBEDDING_INPUT_VERSION: u16 = 2;
 const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 1_000_000;
 const MAX_CACHE_PATH_BYTES: usize = 16 * 1024;
+/// Expected upper bound on chunks per note, used only to size the cache
+/// load budget. Exceeding it costs a rebuild, not corruption.
+const MAX_CHUNKS_PER_NOTE_HINT: usize = 512;
+
+/// Separator between a note path and its chunk ordinal inside store keys.
+/// NUL can never occur in a real filesystem path, so `note\0<idx>` is
+/// unambiguous and lets the chunk-level index reuse the existing
+/// `HashMap<PathBuf, _>` store, cache format and integrity checks untouched.
+pub(crate) const CHUNK_SEP: char = '\u{0}';
+
+/// Build the store key for chunk `index` of `note`.
+pub(crate) fn chunk_key(note: &Path, index: usize) -> PathBuf {
+    let mut s = note.to_string_lossy().into_owned();
+    s.push(CHUNK_SEP);
+    s.push_str(&index.to_string());
+    PathBuf::from(s)
+}
+
+/// Recover the note path from a store key. Plain note paths pass through, so
+/// this is safe to call on both chunk keys and legacy whole-note keys.
+pub(crate) fn note_path_of(key: &Path) -> &Path {
+    match key.to_str() {
+        Some(s) => match s.split_once(CHUNK_SEP) {
+            Some((note, _)) => Path::new(note),
+            None => key,
+        },
+        None => key,
+    }
+}
+
+/// Prefix prepended to every DOCUMENT before embedding.
+///
+/// Asymmetric models need this (Snowflake Arctic wants `query: ` on queries and
+/// nothing on documents; E5 wants `query: `/`passage: `). Configured explicitly
+/// rather than sniffed from the model name.
+pub(crate) fn document_prefix() -> String {
+    std::env::var("OBSIDIAN_EMBEDDING_DOC_PREFIX").unwrap_or_default()
+}
+
+/// Prefix prepended to every QUERY before embedding. See [`document_prefix`].
+pub(crate) fn query_prefix() -> String {
+    std::env::var("OBSIDIAN_EMBEDDING_QUERY_PREFIX").unwrap_or_default()
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EmbeddingBackendKind {
@@ -201,6 +247,21 @@ impl EmbeddingStore {
     }
 
     /// Remove a note's embedding.
+    /// True if `note` has at least one chunk in the store.
+    ///
+    /// O(1): chunks are always written from index 0 upward and committed as a
+    /// unit, so the presence of chunk 0 is equivalent to the note being indexed.
+    pub(crate) fn has_note(&self, note: &Path) -> bool {
+        self.embeddings.contains_key(&chunk_key(note, 0))
+    }
+
+    /// Remove every chunk belonging to `note`. Returns true if anything went.
+    pub(crate) fn remove_note(&mut self, note: &Path) -> bool {
+        let before = self.embeddings.len();
+        self.embeddings.retain(|key, _| note_path_of(key) != note);
+        self.embeddings.len() != before
+    }
+
     pub fn remove(&mut self, path: &Path) -> bool {
         self.embeddings.remove(path).is_some()
     }
@@ -252,12 +313,33 @@ impl EmbeddingStore {
     /// Find the `top_k` most similar notes to `query_vec`, sorted by
     /// descending cosine similarity.
     pub fn query(&self, query_vec: &[f32], top_k: usize) -> Vec<(PathBuf, f32)> {
-        let scored = self
-            .embeddings
-            .iter()
-            .map(|(path, entry)| (path.clone(), cosine_similarity(query_vec, &entry.vector)))
-            .collect();
-        Self::rank_scores(scored, top_k)
+        // Collapse chunk keys to note paths (best chunk wins) so every consumer
+        // of the store sees note-level results, exactly as before chunking.
+        Self::rank_scores(self.collapse_to_notes(query_vec, None), top_k)
+    }
+
+    /// Score every chunk and reduce to one `(note, best_score)` per note.
+    fn collapse_to_notes(
+        &self,
+        query_vec: &[f32],
+        allowed: Option<&HashSet<PathBuf>>,
+    ) -> Vec<(PathBuf, f32)> {
+        let mut best: HashMap<PathBuf, f32> = HashMap::new();
+        for (key, entry) in self.embeddings.iter() {
+            let note = note_path_of(key);
+            if allowed.is_some_and(|set| !set.contains(note)) {
+                continue;
+            }
+            let score = cosine_similarity(query_vec, &entry.vector);
+            best.entry(note.to_path_buf())
+                .and_modify(|slot| {
+                    if score > *slot {
+                        *slot = score;
+                    }
+                })
+                .or_insert(score);
+        }
+        best.into_iter().collect()
     }
 
     pub(crate) fn query_paths(
@@ -266,13 +348,14 @@ impl EmbeddingStore {
         allowed_paths: &HashSet<PathBuf>,
         top_k: usize,
     ) -> Vec<(PathBuf, f32)> {
-        let scored = self
-            .embeddings
-            .iter()
-            .filter(|(path, _)| allowed_paths.contains(*path))
-            .map(|(path, entry)| (path.clone(), cosine_similarity(query_vec, &entry.vector)))
-            .collect();
-        Self::rank_scores(scored, top_k)
+        // Keys are chunk keys. Score every chunk, then collapse to one score per
+        // note by taking its best chunk, so the hybrid fusion contract
+        // (`alpha * BM25 + (1 - alpha) * semantic`, keyed by note path) is
+        // preserved exactly as upstream expects.
+        Self::rank_scores(
+            self.collapse_to_notes(query_vec, Some(allowed_paths)),
+            top_k,
+        )
     }
 
     fn rank_scores(mut scored: Vec<(PathBuf, f32)>, top_k: usize) -> Vec<(PathBuf, f32)> {
@@ -395,10 +478,15 @@ impl EmbeddingStore {
         expected: &EmbeddingSpaceIdentity,
         current_note_count: usize,
     ) -> VaultResult<Self> {
+        // Entries are CHUNKS, not notes. Allow a generous per-note chunk fan-out
+        // so a legitimate chunk-level cache is never rejected as oversized.
         Self::load_bounded(
             path,
             Some(expected),
-            current_note_count.saturating_add(1024),
+            current_note_count
+                .saturating_mul(MAX_CHUNKS_PER_NOTE_HINT)
+                .saturating_add(1024)
+                .min(MAX_CACHE_ENTRIES),
         )
     }
 
