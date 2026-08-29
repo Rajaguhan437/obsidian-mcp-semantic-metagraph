@@ -32,6 +32,10 @@ A query scores both arms and takes the maximum, then every hit reports which
 representation ranked it along with the matching passage and its heading
 path.](docs/images/architecture.png)
 
+*The diagram abbreviates some notation. The exact scoring formula is under*
+*[Retrieval architecture](#retrieval-architecture), and*
+*[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is authoritative where the two differ.*
+
 ---
 
 ## What it gives an agent
@@ -313,6 +317,9 @@ chunks alone and recover to 0.975 once the summary arm is added. R@1 0.908,
 R@5 0.961, R@8 0.961, MRR 0.932. 27.3% of top-8 hits are chunk-attributable and
 100% carry a passage.](docs/images/benchmarks.png)
 
+*[docs/BENCHMARKS.md](docs/BENCHMARKS.md) carries the full numbers and methodology*
+*and is regenerated from live runs; the figure is a summary of it.*
+
 Same vault, queries, gold labels and embedding model throughout. nDCG@10.
 Every figure in this table is from the **live server**.
 
@@ -352,6 +359,9 @@ embedding request, an uncalibrated hybrid blend, and results that could not say
 which passage matched. 758 tests pass with 0 failures and 0 ignored on Ubuntu
 26.04. Warm start 1.6 ms with 0 re-embeds; cold rebuild 8.4 minutes for 416 notes
 and 8,263 chunks; 133 MB peak.](docs/images/engineering.png)
+
+*Every fix below is listed with its regression test in*
+*[docs/FIXES.md](docs/FIXES.md).*
 
 | fix | impact |
 |---|---|
