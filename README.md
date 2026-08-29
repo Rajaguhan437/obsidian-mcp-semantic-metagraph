@@ -39,17 +39,6 @@ On the vault it was developed against that moved retrieval nDCG from **0.834 to
 > and one change that looked clearly beneficial on paper made things worse here.
 > See [Known limitations](#known-limitations) and [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-![Architecture overview: an Obsidian vault is read from disk, parsed and split
-into heading-aware chunks of about 1000 characters with 200 overlap, and indexed
-as two representations per note - many chunk vectors plus one summary vector.
-A query scores both arms and takes the maximum, then every hit reports which
-representation ranked it along with the matching passage and its heading
-path.](docs/images/architecture.png)
-
-*The diagram abbreviates some notation. The exact scoring formula is under*
-*[Retrieval architecture](#retrieval-architecture), and*
-*[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is authoritative where the two differ.*
-
 ---
 
 **Start here** — [Install](#install) · [Configuration](#configuration) · [Tools](#tools)
@@ -61,6 +50,19 @@ path.](docs/images/architecture.png)
 **Evidence** — [Benchmarks](#benchmark-results) · [Fixes over upstream](#significant-fixes-over-upstream) · [Known limitations](#known-limitations)
 
 **Context** — [Why this exists](#why-this-exists) · [Attribution](#attribution) · [All documentation](#documentation)
+
+---
+
+![Architecture overview: an Obsidian vault is read from disk, parsed and split
+into heading-aware chunks of about 1000 characters with 200 overlap, and indexed
+as two representations per note - many chunk vectors plus one summary vector.
+A query scores both arms and takes the maximum, then every hit reports which
+representation ranked it along with the matching passage and its heading
+path.](docs/images/architecture.png)
+
+*The diagram abbreviates some notation. The exact scoring formula is under*
+*[Retrieval architecture](#retrieval-architecture), and*
+*[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is authoritative where the two differ.*
 
 ---
 
