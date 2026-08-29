@@ -149,4 +149,6 @@ O(1). Test: `has_note_counts_notes_not_chunks`.
   comparison.
 - **One test ignored on Windows** — `concurrent_readers_observe_only_complete_atomic_cache_snapshots`
   fails identically on upstream `fea2e1f`: Windows denies the atomic replace while
-  a reader holds the cache file open. It runs on Linux and macOS.
+  a reader holds the cache file open. Now **verified passing on Linux** (Ubuntu
+  26.04, glibc 2.43), so the Windows failure is a platform constraint, not a bug
+  in the cache-swap logic.

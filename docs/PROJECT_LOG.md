@@ -422,3 +422,80 @@ correctly wired. Corrected parameters in `docs/TOOLS.md`.
 Release documentation written: `README.md`, `docs/ARCHITECTURE.md`,
 `docs/BENCHMARKS.md`, `docs/FIXES.md`, `docs/TOOLS.md`. Upstream's original
 README preserved at `docs/UPSTREAM_README.md`.
+
+
+---
+
+## Phase 5b — Linux daemon verification
+
+The 8 daemon integration tests are gated `#[cfg(all(unix, feature =
+"embeddings"))]` and had **never executed** at any point in this project. They
+use Unix domain sockets, so Windows cannot run them even in principle.
+
+### Getting to a usable Linux
+
+| distro | glibc | outcome |
+|---|---|---|
+| Ubuntu 22.04 | 2.35 | **build fails at link** — `undefined symbol: __isoc23_strtoll` |
+| Ubuntu 26.04 | 2.43 | builds and passes |
+
+The prebuilt ONNX Runtime that `ort-sys` downloads for the `embeddings` feature
+references `__isoc23_*`, introduced in glibc 2.38. This is a property of the
+*binary being linked*, not of our code, and it does not affect `embeddings-api`
+(pure Rust over rustls). Recorded in the README as an install requirement.
+
+A process note worth keeping: roughly ten minutes were burned compiling on 22.04
+before running `ldd --version`. The cheap check that would have predicted the
+failure was available from the start and was not run first.
+
+### Two network faults, neither in the code
+
+Large HTTPS transfers were being severed on this WSL instance:
+
+1. `cargo fetch` aborted with `transfer too slow` on `static.crates.io`.
+   Fixed with `~/.cargo/config.toml`: `multiplexing = false`,
+   `low-speed-limit = 0`, `retry = 10`, then a fetch/build split so a network
+   blip cannot kill a long compile.
+2. The fastembed model download hung on an **established but idle socket** —
+   `hf-hub` sets no read timeout, so it waited indefinitely. `curl` reproduced
+   the same failure (`SSL_read: unexpected eof` after 47 MB), which is what
+   proved the fault was the network path and not `hf-hub`.
+
+Resolved by fetching the five model files with a resumable `curl` and assembling
+the hf-hub cache directly. `ApiRepo::get()` short-circuits on a cache hit and
+makes no network call at all, so the tests then ran fully offline. Layout:
+`blobs/{etag}`, `snapshots/{commit}/{file}` symlinks, `refs/main`. The model's
+`x-linked-etag` matched the stalled `.part` filename, which confirmed the
+reconstruction before anything was run.
+
+The model is byte-identical to what fastembed would have fetched
+(`onnx/model.onnx`, 133,093,490 bytes, commit `ea104dac`).
+
+### Results — Ubuntu 26.04, glibc 2.43, rustc 1.98.0
+
+| target | tests | result |
+|---|---|---|
+| unit (lib) | 670 | pass |
+| binary | 1 | pass |
+| `daemon_integration_tests` | **8** | pass |
+| `integration_tests` | 72 | pass |
+| **total** | **751** | **0 fail, 0 ignored** |
+
+All 8 daemon tests pass in 7.18 s: health/open-hint, Unicode-equivalent path
+acceptance, path-traversal rejection, per-vault isolation, watcher
+create/modify/delete sync, concurrent client attach+query, recovery after a
+watcher reindex error, and the empty-query short-circuit in hybrid search.
+
+### On comparing the counts to Windows
+
+Windows recorded 737 pass / 1 ignored; Linux records 751 pass / 0 ignored.
+**Neither is a superset.** `src/` has 24 Windows-gated blocks (6 unit tests that
+cannot run on Linux), while `tests/integration_tests.rs` has
+`#[cfg(all(unix, ...))]` blocks contributing 12 tests that cannot run on Windows,
+plus the 8 daemon tests. Reporting this as "751 > 737, therefore better" would be
+wrong.
+
+`concurrent_readers_observe_only_complete_atomic_cache_snapshots` — ignored on
+Windows and failing identically on upstream `fea2e1f` — **passes here**. That
+promotes the Windows failure from an asserted platform limitation to a
+demonstrated one.

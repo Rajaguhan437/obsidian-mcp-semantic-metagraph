@@ -80,6 +80,16 @@ cargo install --path . --features embeddings
 Building with neither feature yields a server with lexical and graph tools but no
 semantic search.
 
+**Platform note for `--features embeddings`.** This backend links a prebuilt ONNX
+Runtime that requires **glibc >= 2.38** (it references the `__isoc23_*` symbols).
+Ubuntu 24.04+, Debian 13+ and Fedora 39+ satisfy this. On older systems the build
+fails at link time with `undefined symbol: __isoc23_strtoll` — observed on Ubuntu
+22.04 (glibc 2.35); verified working on Ubuntu 26.04 (glibc 2.43).
+
+`--features embeddings-api` carries no such constraint: it is pure Rust over
+rustls and builds anywhere Rust does. Prefer it if you already run Ollama, LM
+Studio or any OpenAI-compatible endpoint.
+
 ### Quick start with Ollama
 
 ```bash
@@ -263,12 +273,16 @@ Each has a regression test. Detail: [docs/FIXES.md](docs/FIXES.md).
 - **`wikilinks` output is not deterministically ordered** (hash-map iteration),
   which matters for snapshot testing.
 - **One test is ignored on Windows** — a pre-existing upstream failure where
-  Windows denies an atomic file replace while a reader holds the file open. It
-  runs on Linux and macOS.
+  Windows denies an atomic file replace while a reader holds the file open.
+  Confirmed to run and pass on Linux (Ubuntu 26.04, glibc 2.43), which is what
+  establishes it as a platform limitation rather than a defect.
 - **Section packing is implemented but unproven elsewhere.** It halved the index
   here at a small measured quality cost; no other corpus has been tested.
-- **The daemon path is lightly exercised** in this fork's testing; `local` and
-  `auto` modes are the well-trodden ones.
+- **The daemon is covered by tests but not by benchmarks.** Its 8 integration
+  tests (Unix-socket IPC, per-vault isolation, watcher sync, concurrent clients,
+  error recovery) pass on Linux. They are `#[cfg(all(unix, feature =
+  "embeddings"))]`, so they cannot run on Windows at all. The retrieval
+  *benchmarks* were all run through `local` mode.
 
 ## Attribution
 
