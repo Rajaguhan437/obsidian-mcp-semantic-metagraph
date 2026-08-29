@@ -204,7 +204,7 @@ impl VaultContext {
         let mut combined = normalized
             .into_iter()
             .map(|(path, normalized_bm25)| {
-                let semantic = snapshot.score_for(&path, &query_embedding);
+                let semantic = snapshot.blend_score_for(&path, &query_embedding);
                 let score = alpha * normalized_bm25 + (1.0 - alpha) * semantic;
                 (path, score)
             })

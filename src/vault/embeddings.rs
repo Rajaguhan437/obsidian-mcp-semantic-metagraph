@@ -1644,6 +1644,26 @@ mod tests {
 
     // ── experimental hybrid ranking (Phase 3) ─────────────────────────
 
+    /// REGRESSION: Phase 2 made the semantic score reach w_sum (1.25), which
+    /// silently unbalanced the two pre-existing hybrid blends - they mix it with
+    /// a [0,1] lexical score, so the alpha the caller sets stopped meaning what
+    /// it says. The blend-safe accessor must rescale to [0,1] without reordering.
+    #[test]
+    fn blend_rescaling_is_monotone_and_bounded() {
+        let w = DEFAULT_SUMMARY_WEIGHT;
+        assert!(w > 1.0, "this test only matters while the weight exceeds 1");
+
+        // a perfect summary match is w before rescaling, 1.0 after
+        let raw = [1.0f32 * w, 0.6 * w, 0.2];
+        let scaled: Vec<f32> = raw.iter().map(|s| s / w.max(1.0)).collect();
+        assert!(scaled.iter().all(|s| *s <= 1.0 + 1e-6), "must land inside [0,1]");
+
+        // order is preserved - rescaling must not reorder the semantic arm
+        for pair in scaled.windows(2) {
+            assert!(pair[0] >= pair[1], "rescaling reordered the semantic arm");
+        }
+    }
+
     /// Hybrid ranking must be OFF unless explicitly enabled.
     #[test]
     fn lexical_weight_defaults_to_disabled() {

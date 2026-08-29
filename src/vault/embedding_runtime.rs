@@ -186,6 +186,18 @@ impl EmbeddingQuerySnapshot {
         let store = self.store.read().unwrap_or_else(|error| error.into_inner());
         store.best_score_for_note(path, query_vector).unwrap_or(0.0)
     }
+
+    /// Semantic score rescaled to `[0, 1]` for blending with another arm.
+    ///
+    /// [`Self::score_for`] is a RANKING score, not a cosine: the weighted
+    /// summary arm can push it to `OBSIDIAN_SUMMARY_WEIGHT` (1.25 by default).
+    /// Blending that directly against a `[0, 1]` lexical score silently
+    /// changes what `alpha` means. Dividing by the weight is monotone, so the
+    /// semantic ordering is untouched - only the balance between arms is fixed.
+    pub(crate) fn blend_score_for(&self, path: &Path, query_vector: &[f32]) -> f32 {
+        let weight = super::embeddings::summary_weight().max(1.0);
+        self.score_for(path, query_vector) / weight
+    }
 }
 
 impl EmbeddingRuntime {

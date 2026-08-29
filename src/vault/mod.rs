@@ -688,7 +688,7 @@ impl Vault {
             .into_iter()
             .filter(|(path, _)| index.get_note(path).is_some())
             .map(|(path, norm_score)| {
-                let semantic_score = snapshot.score_for(&path, &query_vec);
+                let semantic_score = snapshot.blend_score_for(&path, &query_vec);
                 let final_score = alpha * norm_score + (1.0 - alpha) * semantic_score;
                 (path, final_score)
             })
