@@ -23,7 +23,7 @@ const CACHE_MAGIC: [u8; 8] = *b"OBSMCPEM";
 const CACHE_SCHEMA_VERSION: u16 = 1;
 // v2: chunk-level embedding text (see vault::chunker). Bumping this
 // invalidates every v1 whole-note cache automatically.
-pub(crate) const EMBEDDING_INPUT_VERSION: u16 = 2;
+pub(crate) const EMBEDDING_INPUT_VERSION: u16 = 3;
 const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 1_000_000;
 const MAX_CACHE_PATH_BYTES: usize = 16 * 1024;
@@ -57,18 +57,65 @@ pub(crate) fn note_path_of(key: &Path) -> &Path {
     }
 }
 
+/// Suffix marking the per-note SUMMARY entry, distinct from any chunk ordinal.
+const SUMMARY_MARKER: &str = "s";
+
+/// Default weight applied to the summary arm.
+///
+/// Measured on a 413-note vault: quality is flat across [1.20, 1.30] and
+/// deep-content retrieval degrades sharply at 1.32 (nDCG .941 -> .919), so the
+/// default sits mid-plateau rather than at the edge.
+pub(crate) const DEFAULT_SUMMARY_WEIGHT: f32 = 1.25;
+
+/// Store key for a note's summary vector.
+pub(crate) fn summary_key(note: &Path) -> PathBuf {
+    let mut s = note.to_string_lossy().into_owned();
+    s.push(CHUNK_SEP);
+    s.push_str(SUMMARY_MARKER);
+    PathBuf::from(s)
+}
+
+/// True if `key` addresses a summary vector rather than a chunk.
+pub(crate) fn is_summary_key(key: &Path) -> bool {
+    key.to_str()
+        .and_then(|s| s.split_once(CHUNK_SEP))
+        .is_some_and(|(_, suffix)| suffix == SUMMARY_MARKER)
+}
+
+/// Weight applied to the summary arm, from `OBSIDIAN_SUMMARY_WEIGHT`.
+///
+/// A weight of 0 disables the summary arm entirely (pure chunk retrieval).
+pub(crate) fn summary_weight() -> f32 {
+    match std::env::var("OBSIDIAN_SUMMARY_WEIGHT") {
+        Ok(raw) => match raw.trim().parse::<f32>() {
+            Ok(value) if value >= 0.0 && value.is_finite() => {
+                if value > 1.30 {
+                    tracing::warn!(
+                        weight = value,
+                        "OBSIDIAN_SUMMARY_WEIGHT above 1.30 measurably degrades \
+                         deep-content retrieval; 1.20-1.30 is the tested range"
+                    );
+                }
+                value
+            }
+            _ => DEFAULT_SUMMARY_WEIGHT,
+        },
+        Err(_) => DEFAULT_SUMMARY_WEIGHT,
+    }
+}
+
 /// Prefix prepended to every DOCUMENT before embedding.
 ///
 /// Asymmetric models need this (Snowflake Arctic wants `query: ` on queries and
 /// nothing on documents; E5 wants `query: `/`passage: `). Configured explicitly
 /// rather than sniffed from the model name.
 pub(crate) fn document_prefix() -> String {
-    std::env::var("OBSIDIAN_EMBEDDING_DOC_PREFIX").unwrap_or_default()
+    std::env::var("OBSIDIAN_EMBEDDING_DOC_PREFIX").unwrap_or_else(|_| "passage: ".to_string())
 }
 
 /// Prefix prepended to every QUERY before embedding. See [`document_prefix`].
 pub(crate) fn query_prefix() -> String {
-    std::env::var("OBSIDIAN_EMBEDDING_QUERY_PREFIX").unwrap_or_default()
+    std::env::var("OBSIDIAN_EMBEDDING_QUERY_PREFIX").unwrap_or_else(|_| "query: ".to_string())
 }
 
 
@@ -266,6 +313,13 @@ impl EmbeddingStore {
             best = Some(best.map_or(score, |current: f32| current.max(score)));
             index += 1;
         }
+        // The summary arm competes with the best chunk, scaled by its weight.
+        // max() is deliberate: it is monotone, so a summary can only rescue a
+        // note, never dilute one whose answer lives in a single chunk.
+        if let Some(entry) = self.embeddings.get(&summary_key(note)) {
+            let score = summary_weight() * cosine_similarity(query_vec, &entry.vector);
+            best = Some(best.map_or(score, |current: f32| current.max(score)));
+        }
         best
     }
 
@@ -275,6 +329,7 @@ impl EmbeddingStore {
     /// unit, so the presence of chunk 0 is equivalent to the note being indexed.
     pub(crate) fn has_note(&self, note: &Path) -> bool {
         self.embeddings.contains_key(&chunk_key(note, 0))
+            || self.embeddings.contains_key(&summary_key(note))
     }
 
     /// Remove every chunk belonging to `note`. Returns true if anything went.
@@ -354,13 +409,17 @@ impl EmbeddingStore {
         query_vec: &[f32],
         allowed: Option<&HashSet<PathBuf>>,
     ) -> Vec<(PathBuf, f32)> {
+        let weight = summary_weight();
         let mut best: HashMap<PathBuf, f32> = HashMap::new();
         for (key, entry) in self.embeddings.iter() {
             let note = note_path_of(key);
             if allowed.is_some_and(|set| !set.contains(note)) {
                 continue;
             }
-            let score = cosine_similarity(query_vec, &entry.vector);
+            let mut score = cosine_similarity(query_vec, &entry.vector);
+            if is_summary_key(key) {
+                score *= weight;
+            }
             best.entry(note.to_path_buf())
                 .and_modify(|slot| {
                     if score > *slot {
@@ -1543,6 +1602,118 @@ mod tests {
         assert_eq!(loaded.len(), 40);
         assert_eq!(loaded.content_hash(&chunk_key(&note, 0)), Some(&hash));
         assert!(loaded.first_pass_complete());
+    }
+
+    // ── summary arm (Phase 2) ────────────────────────────────────────
+
+    /// The summary key must be distinguishable from every chunk ordinal, and
+    /// must still resolve back to its note like any other key.
+    #[test]
+    fn summary_key_is_distinct_from_chunk_keys() {
+        let note = PathBuf::from("dir/a note.md");
+        let summary = summary_key(&note);
+        assert!(is_summary_key(&summary));
+        assert_eq!(note_path_of(&summary), note.as_path());
+        for i in 0..5 {
+            let c = chunk_key(&note, i);
+            assert_ne!(c, summary, "chunk {i} collided with the summary key");
+            assert!(!is_summary_key(&c));
+        }
+    }
+
+    /// The summary competes with the best chunk, scaled by its weight, and the
+    /// combination is a MAX so it can never drag a good chunk down.
+    #[test]
+    fn summary_arm_is_weighted_and_never_dilutes_a_good_chunk() {
+        let note = PathBuf::from("n.md");
+        let query = [1.0f32, 0.0, 0.0];
+
+        // summary matches, chunks do not -> weighted summary wins
+        let mut store = EmbeddingStore::new(3);
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![0.0, 1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(summary_key(&note), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        let scored = store.best_score_for_note(&note, &query).unwrap();
+        assert!(
+            (scored - DEFAULT_SUMMARY_WEIGHT).abs() < 1e-5,
+            "summary should score cos*w, got {scored}"
+        );
+
+        // a perfect chunk still wins when the summary is irrelevant
+        let mut store = EmbeddingStore::new(3);
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(summary_key(&note), [0u8; 32], vec![0.0, 0.0, 1.0])
+            .unwrap();
+        let scored = store.best_score_for_note(&note, &query).unwrap();
+        assert!(
+            (scored - 1.0).abs() < 1e-5,
+            "the matching chunk should win, got {scored}"
+        );
+    }
+
+    /// query() must weight the summary the same way best_score_for_note does,
+    /// or ranking and re-ranking disagree about the same note.
+    #[test]
+    fn query_weights_the_summary_arm_consistently() {
+        let note = PathBuf::from("n.md");
+        let mut store = EmbeddingStore::new(3);
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![0.0, 1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(summary_key(&note), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        let hits = store.query(&[1.0, 0.0, 0.0], 5);
+        assert_eq!(hits.len(), 1, "one note, not one row per entry");
+        assert_eq!(hits[0].0, note);
+        assert!(
+            (hits[0].1 - store.best_score_for_note(&note, &[1.0, 0.0, 0.0]).unwrap()).abs() < 1e-5,
+            "query() and best_score_for_note() must agree"
+        );
+    }
+
+    /// Deleting a note must take its summary with it.
+    #[test]
+    fn remove_note_drops_the_summary_too() {
+        let note = PathBuf::from("gone.md");
+        let mut store = EmbeddingStore::new(2);
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(summary_key(&note), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+        assert!(store.remove_note(&note));
+        assert!(store.is_empty(), "summary vector outlived its note");
+        assert!(!store.has_note(&note));
+    }
+
+    /// A note short enough to yield no chunks is still indexed via its summary.
+    #[test]
+    fn has_note_accepts_a_summary_only_note() {
+        let note = PathBuf::from("tiny.md");
+        let mut store = EmbeddingStore::new(2);
+        store
+            .insert_hashed(summary_key(&note), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+        assert!(store.has_note(&note));
+    }
+
+    /// Prefix defaults match the benchmarked arctic configuration.
+    #[test]
+    fn prefixes_default_to_the_validated_configuration() {
+        if std::env::var("OBSIDIAN_EMBEDDING_QUERY_PREFIX").is_err() {
+            assert_eq!(query_prefix(), "query: ");
+        }
+        if std::env::var("OBSIDIAN_EMBEDDING_DOC_PREFIX").is_err() {
+            assert_eq!(document_prefix(), "passage: ");
+        }
     }
 
     /// REGRESSION: chunk keys embed a NUL separator (note<idx>). If the cache

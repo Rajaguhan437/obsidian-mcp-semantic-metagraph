@@ -28,6 +28,15 @@ pub const DEFAULT_CHUNK_OVERLAP: usize = 200;
 /// or a note with no whitespace) can never emit an unbounded chunk.
 const HARD_MAX_FACTOR: usize = 2;
 
+/// Adjacent sections may be packed together up to the target.
+///
+/// OFF by default. Measured on a 413-note vault it halves the index (8263 ->
+/// 4076 vectors) but costs retrieval: the sections that answer queries there
+/// are short and precisely titled, and packing dissolves them into their
+/// neighbours. Vaults of long prose rather than short titled sections should
+/// benefit; enable with OBSIDIAN_CHUNK_PACKING=true.
+pub const DEFAULT_CHUNK_PACKING: bool = false;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     /// 0-based position of this chunk within the note.
@@ -45,6 +54,8 @@ pub struct Chunk {
 pub struct ChunkConfig {
     pub target: usize,
     pub overlap: usize,
+    /// Pack adjacent small sections together. See [`DEFAULT_CHUNK_PACKING`].
+    pub packing: bool,
 }
 
 impl Default for ChunkConfig {
@@ -52,6 +63,7 @@ impl Default for ChunkConfig {
         Self {
             target: DEFAULT_CHUNK_CHARS,
             overlap: DEFAULT_CHUNK_OVERLAP,
+            packing: DEFAULT_CHUNK_PACKING,
         }
     }
 }
@@ -69,7 +81,14 @@ impl ChunkConfig {
             .unwrap_or(DEFAULT_CHUNK_OVERLAP);
         // Overlap must leave forward progress.
         let overlap = overlap.min(target.saturating_sub(1) / 2);
-        Self { target, overlap }
+        let packing = std::env::var("OBSIDIAN_CHUNK_PACKING")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(DEFAULT_CHUNK_PACKING);
+        Self {
+            target,
+            overlap,
+            packing,
+        }
     }
 
     fn hard_max(&self) -> usize {
@@ -150,6 +169,41 @@ fn sections(body: &str) -> Vec<Section> {
     out
 }
 
+/// Merge adjacent sections while the span stays within `target`.
+///
+/// Each result is still a contiguous slice of the body, so offsets and returned
+/// passages stay exact. Oversized sections pass through untouched and are split
+/// downstream exactly as in the unpacked path.
+fn packed_sections(body: &str, target: usize) -> Vec<Section> {
+    let raw: Vec<Section> = sections(body)
+        .into_iter()
+        .filter(|s| !body[s.start..s.end].trim().is_empty())
+        .collect();
+    let mut out: Vec<Section> = Vec::new();
+    let mut i = 0usize;
+    while i < raw.len() {
+        let start = raw[i].start;
+        let crumb = raw[i].breadcrumb.clone();
+        let mut end = raw[i].end;
+        if end - start <= target {
+            let mut j = i + 1;
+            while j < raw.len() && raw[j].end - start <= target {
+                end = raw[j].end;
+                j += 1;
+            }
+            i = if j > i { j } else { i + 1 };
+        } else {
+            i += 1;
+        }
+        out.push(Section {
+            breadcrumb: crumb,
+            start,
+            end,
+        });
+    }
+    out
+}
+
 /// Find a good split point at or before `limit` within `s`: prefer a paragraph
 /// break, then a sentence end, then a newline, then a space. Returns a byte
 /// index that always lies on a char boundary.
@@ -195,7 +249,12 @@ fn split_point(s: &str, limit: usize) -> usize {
 /// chunk exceeds `config.hard_max()`.
 pub fn chunk_note(body: &str, config: ChunkConfig) -> Vec<Chunk> {
     let mut chunks = Vec::new();
-    for section in sections(body) {
+    let walk = if config.packing {
+        packed_sections(body, config.target)
+    } else {
+        sections(body)
+    };
+    for section in walk {
         let raw = &body[section.start..section.end];
         if raw.trim().is_empty() {
             continue;
@@ -261,7 +320,11 @@ mod tests {
     use super::*;
 
     fn cfg(target: usize, overlap: usize) -> ChunkConfig {
-        ChunkConfig { target, overlap }
+        ChunkConfig {
+            target,
+            overlap,
+            packing: false,
+        }
     }
 
     #[test]
@@ -337,9 +400,74 @@ mod tests {
     fn chunking_always_progresses() {
         // Overlap >= target must not loop forever.
         let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z ".repeat(50);
-        let chunks = chunk_note(&body, ChunkConfig { target: 200, overlap: 500 });
+        let chunks = chunk_note(&body, ChunkConfig {
+            target: 200,
+            overlap: 500,
+            packing: false,
+        });
         assert!(!chunks.is_empty());
         assert!(chunks.len() < 10_000);
+    }
+
+    fn packed(target: usize, overlap: usize) -> ChunkConfig {
+        ChunkConfig {
+            target,
+            overlap,
+            packing: true,
+        }
+    }
+
+    #[test]
+    fn packing_is_off_by_default() {
+        assert!(!ChunkConfig::default().packing);
+        assert!(!DEFAULT_CHUNK_PACKING);
+    }
+
+    /// Packing merges adjacent small sections, so the same body yields fewer
+    /// chunks - measured at roughly half on a real vault.
+    #[test]
+    fn packing_merges_adjacent_small_sections() {
+        let body = (0..12)
+            .map(|i| format!("## H{i}\nshort body {i}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        let bound = chunk_note(&body, cfg(1000, 200));
+        let pack = chunk_note(&body, packed(1000, 200));
+        assert!(
+            pack.len() < bound.len(),
+            "packing produced {} chunks vs {} unpacked",
+            pack.len(),
+            bound.len()
+        );
+        assert!(!pack.is_empty());
+    }
+
+    /// Packed chunks must remain contiguous slices of the body so offsets and
+    /// returned passages stay exact.
+    #[test]
+    fn packed_chunks_preserve_provenance() {
+        let body = "## A\nalpha text\n## B\nbeta text\n## C\ngamma text\n";
+        for chunk in chunk_note(body, packed(1000, 200)) {
+            let slice = &body[chunk.offset..];
+            assert!(
+                slice.starts_with(chunk.text.trim_end()) || slice.contains(chunk.text.trim_end()),
+                "chunk at offset {} is not a slice of the body",
+                chunk.offset
+            );
+        }
+    }
+
+    /// Packing must still respect the hard ceiling.
+    #[test]
+    fn packed_chunks_respect_hard_max() {
+        let body = (0..40)
+            .map(|i| format!("## H{i}\n{}\n", "x".repeat(300)))
+            .collect::<Vec<_>>()
+            .join("");
+        let config = packed(1000, 200);
+        for chunk in chunk_note(&body, config) {
+            assert!(chunk.text.len() <= config.hard_max());
+        }
     }
 
     #[test]

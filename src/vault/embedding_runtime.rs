@@ -176,6 +176,12 @@ impl EmbeddingQuerySnapshot {
         Ok(store.query_paths(&query_vector, allowed_paths, top_k))
     }
 
+    /// Semantic score for one note: the best of its chunks, versus its summary
+    /// scaled by `OBSIDIAN_SUMMARY_WEIGHT`.
+    ///
+    /// NOTE: with a weight above 1.0 this can exceed 1.0, so it is a RANKING
+    /// score, not a cosine. Any score-space fusion added later must normalise
+    /// before blending it with BM25.
     pub(crate) fn score_for(&self, path: &Path, query_vector: &[f32]) -> f32 {
         let store = self.store.read().unwrap_or_else(|error| error.into_inner());
         store.best_score_for_note(path, query_vector).unwrap_or(0.0)
@@ -914,6 +920,25 @@ fn prepare_batch(
                             )
                         })
                         .collect::<Vec<_>>();
+                    // Summary arm: the ORIGINAL whole-note representation
+                    // (title + ALL headings + first 400 words). It is what made
+                    // upstream strong on typo-heavy and title-shaped queries,
+                    // which chunking alone regressed. Stored beside the chunks
+                    // under a reserved key and weighted at query time.
+                    let mut chunks = chunks;
+                    let headings = metadata
+                        .headings
+                        .iter()
+                        .map(|heading| heading.text.clone())
+                        .collect::<Vec<_>>();
+                    chunks.push((
+                        super::embeddings::summary_key(&work.path),
+                        super::embeddings::prepare_embed_text(
+                            &metadata.title,
+                            &headings,
+                            body,
+                        ),
+                    ));
                     PreparedWork::Upsert {
                         work,
                         chunks,
@@ -1449,7 +1474,7 @@ mod tests {
         let content = super::super::fs::read_file(root, path).unwrap();
         let body = super::super::frontmatter::get_body(&content);
         let config = super::super::chunker::ChunkConfig::from_env();
-        super::super::chunker::chunk_note(body, config)
+        let mut texts: Vec<String> = super::super::chunker::chunk_note(body, config)
             .iter()
             .map(|piece| {
                 super::super::chunker::prepare_chunk_embed_text(
@@ -1458,7 +1483,20 @@ mod tests {
                     &piece.text,
                 )
             })
-            .collect()
+            .collect();
+        let headings = metadata
+            .headings
+            .iter()
+            .map(|heading| heading.text.clone())
+            .collect::<Vec<_>>();
+        texts.push(crate::vault::embeddings::prepare_embed_text(
+            &metadata.title,
+            &headings,
+            body,
+        ));
+        // process_batch prefixes every document before embedding
+        let prefix = crate::vault::embeddings::document_prefix();
+        texts.into_iter().map(|t| format!("{prefix}{t}")).collect()
     }
 
     /// Seed `store` with exactly the chunk entries production would commit for
@@ -1490,6 +1528,14 @@ mod tests {
                 )
                 .unwrap();
         }
+        // production also stores one summary vector per note
+        store
+            .insert_hashed(
+                crate::vault::embeddings::summary_key(path),
+                hash,
+                vector.clone(),
+            )
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1592,7 +1638,8 @@ mod tests {
         .unwrap();
         let cache = EmbeddingStore::load(&cache_path).unwrap();
         assert!(cache.first_pass_complete());
-        assert_eq!(cache.len(), 1);
+        // one chunk plus the note's summary vector
+        assert_eq!(cache.len(), 2);
     }
 
     #[tokio::test]
@@ -1702,7 +1749,8 @@ mod tests {
         assert!(target_path.is_file(), "relocation must publish the target");
         let loaded = EmbeddingStore::load(&target_path).unwrap();
         assert!(loaded.first_pass_complete());
-        assert_eq!(loaded.len(), 1);
+        // one chunk plus the note's summary vector
+        assert_eq!(loaded.len(), 2);
     }
 
     #[tokio::test]
@@ -1794,17 +1842,12 @@ mod tests {
             status
                 .last_error
                 .as_deref()
-                .is_some_and(|error| error.contains("1 vectors for 2 inputs"))
+                .is_some_and(|error| error.contains("1 vectors for"))
         );
         let snapshot = runtime.query_snapshot().unwrap();
-        assert_eq!(
-            snapshot.score_for(Path::new("one.md"), &[1.0, 0.0, 0.0]),
-            1.0
-        );
-        assert_eq!(
-            snapshot.score_for(Path::new("two.md"), &[0.0, 1.0, 0.0]),
-            1.0
-        );
+        let w = crate::vault::embeddings::DEFAULT_SUMMARY_WEIGHT;
+        assert_eq!(snapshot.score_for(Path::new("one.md"), &[1.0, 0.0, 0.0]), w);
+        assert_eq!(snapshot.score_for(Path::new("two.md"), &[0.0, 1.0, 0.0]), w);
     }
 
     #[tokio::test]
@@ -1847,7 +1890,9 @@ mod tests {
         // so finishing batch 0 takes several provider calls rather than one.
         // Release exactly enough to commit batch 0 and start batch 1 - no more,
         // or the first pass completes and there is no incomplete checkpoint.
-        let calls_per_batch = RECONCILE_BATCH_SIZE.div_ceil(EMBED_SUB_BATCH_DEFAULT);
+        // each tiny fixture note yields one chunk plus one summary vector
+        let entries_per_batch = RECONCILE_BATCH_SIZE * 2;
+        let calls_per_batch = entries_per_batch.div_ceil(EMBED_SUB_BATCH_DEFAULT);
         for expected in 1..=calls_per_batch {
             tokio::time::sleep(MAX_DIRTY_INTERVAL + Duration::from_millis(20)).await;
             release_tx.send(()).unwrap();
@@ -1862,7 +1907,7 @@ mod tests {
         tokio::time::sleep(MAX_DIRTY_INTERVAL + Duration::from_millis(50)).await;
 
         let checkpoint = EmbeddingStore::load(&cache_path).unwrap();
-        // entries are chunks now, and each tiny fixture note yields one
+        // entries are chunks plus one summary per note
         assert!(checkpoint.len() >= RECONCILE_BATCH_SIZE);
         assert!(!checkpoint.first_pass_complete());
         assert!(!runtime.status().queryable);
@@ -1874,7 +1919,7 @@ mod tests {
                 let persisted = EmbeddingStore::load(&cache_path).ok();
                 if persisted
                     .as_ref()
-                    .is_some_and(|store| store.first_pass_complete() && store.len() >= 33)
+                    .is_some_and(|store| store.first_pass_complete() && store.len() >= 33 * 2)
                 {
                     return;
                 }
@@ -1920,7 +1965,12 @@ mod tests {
         );
         wait_for_status(&runtime, |status| status.phase == EmbeddingPhase::Degraded).await;
         let snapshot = runtime.query_snapshot().unwrap();
-        assert!((snapshot.score_for(Path::new("one.md"), &[1.0, 0.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!(
+            (snapshot.score_for(Path::new("one.md"), &[1.0, 0.0, 0.0])
+                - crate::vault::embeddings::DEFAULT_SUMMARY_WEIGHT)
+                .abs()
+                < 1e-6
+        );
 
         fake.fail.store(false, AtomicOrdering::SeqCst);
         wait_for_status(&runtime, |status| status.phase == EmbeddingPhase::Ready).await;
@@ -1998,9 +2048,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let snapshot = runtime.query_snapshot().unwrap();
+        // the summary arm is weighted, so a perfect match scores w_sum, not 1.0
         assert_eq!(
             snapshot.score_for(Path::new("one.md"), &[0.0, 1.0, 0.0]),
-            1.0
+            crate::vault::embeddings::DEFAULT_SUMMARY_WEIGHT
         );
 
         let shared = Arc::clone(&runtime.control.shared);
@@ -2081,7 +2132,7 @@ mod tests {
 
         assert_eq!(
             snapshot.score_for(Path::new("one.md"), &[0.0, 1.0, 0.0]),
-            1.0,
+            crate::vault::embeddings::DEFAULT_SUMMARY_WEIGHT,
             "a held last-known-good snapshot must not change after runtime drop"
         );
         assert_eq!(
