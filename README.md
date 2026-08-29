@@ -25,6 +25,13 @@ On the vault it was developed against that moved retrieval nDCG from **0.834 to
 > and one change that looked clearly beneficial on paper made things worse here.
 > See [Known limitations](#known-limitations) and [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
+![Architecture overview: an Obsidian vault is read from disk, parsed and split
+into heading-aware chunks of about 1000 characters with 200 overlap, and indexed
+as two representations per note - many chunk vectors plus one summary vector.
+A query scores both arms and takes the maximum, then every hit reports which
+representation ranked it along with the matching passage and its heading
+path.](docs/images/architecture.png)
+
 ---
 
 ## What it gives an agent
@@ -299,6 +306,13 @@ case, so it stays — inert unless `OBSIDIAN_SEMANTIC_MODE` selects it.
 
 ## Benchmark results
 
+![Benchmark results across six query strata, nDCG@10. Overall 0.834 upstream,
+0.900 chunks-only, 0.939 this fork. Deep content, where the answer sits past word
+400, goes 0.552 to 0.941. Casual and typo-heavy queries regress to 0.875 with
+chunks alone and recover to 0.975 once the summary arm is added. R@1 0.908,
+R@5 0.961, R@8 0.961, MRR 0.932. 27.3% of top-8 hits are chunk-attributable and
+100% carry a passage.](docs/images/benchmarks.png)
+
 Same vault, queries, gold labels and embedding model throughout. nDCG@10.
 Every figure in this table is from the **live server**.
 
@@ -330,6 +344,14 @@ Reporting only the aggregate would have hidden that, and the fix would never hav
 been found. Methodology and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Significant fixes over upstream
+
+![Seven upstream problems and their fixes: the 400-word truncation, a cache wiped
+on every restart, content edits past the truncation never re-embedding, notes with
+non-mapping frontmatter dropped from the graph, whole batches sent as one
+embedding request, an uncalibrated hybrid blend, and results that could not say
+which passage matched. 758 tests pass with 0 failures and 0 ignored on Ubuntu
+26.04. Warm start 1.6 ms with 0 re-embeds; cold rebuild 8.4 minutes for 416 notes
+and 8,263 chunks; 133 MB peak.](docs/images/engineering.png)
 
 | fix | impact |
 |---|---|
