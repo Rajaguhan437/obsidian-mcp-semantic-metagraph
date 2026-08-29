@@ -104,6 +104,44 @@ pub(crate) fn summary_weight() -> f32 {
     }
 }
 
+/// Weight of the lexical (BM25) arm in experimental hybrid ranking.
+///
+/// **Zero by default: hybrid ranking is OFF.** On the corpus this fork was
+/// tuned against, adding BM25 never beat semantic-only. The decisive
+/// measurement was that BM25 ranked *nothing* the semantic system missed
+/// (0 of 76 queries), while it could have spoiled 19 - its contribution was a
+/// strict subset. The cause is structural: the summary vector already embeds
+/// title and all headings, which are exactly the fields BM25 boosts hardest.
+///
+/// Other vaults - heavy in rare proper nouns, identifiers or exact strings -
+/// may differ, so the knob exists. Values around 0.10 were the least harmful
+/// here; above ~0.25 quality degrades sharply.
+pub(crate) fn lexical_weight() -> f32 {
+    std::env::var("OBSIDIAN_LEXICAL_WEIGHT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// Scale a score set by its own maximum, leaving the floor at zero.
+///
+/// Deliberately NOT min-max: min-max stretches the weakest candidate of every
+/// query up to 0, which hands a flat bonus to irrelevant documents when a query
+/// has no real lexical signal.
+pub(crate) fn unit_calibrate(scores: &mut [f32]) {
+    let max = scores.iter().copied().fold(0.0f32, f32::max);
+    if max > 1e-9 {
+        for score in scores.iter_mut() {
+            *score /= max;
+        }
+    } else {
+        for score in scores.iter_mut() {
+            *score = 0.0;
+        }
+    }
+}
+
 /// Prefix prepended to every DOCUMENT before embedding.
 ///
 /// Asymmetric models need this (Snowflake Arctic wants `query: ` on queries and
@@ -1602,6 +1640,36 @@ mod tests {
         assert_eq!(loaded.len(), 40);
         assert_eq!(loaded.content_hash(&chunk_key(&note, 0)), Some(&hash));
         assert!(loaded.first_pass_complete());
+    }
+
+    // ── experimental hybrid ranking (Phase 3) ─────────────────────────
+
+    /// Hybrid ranking must be OFF unless explicitly enabled.
+    #[test]
+    fn lexical_weight_defaults_to_disabled() {
+        if std::env::var("OBSIDIAN_LEXICAL_WEIGHT").is_err() {
+            assert_eq!(lexical_weight(), 0.0);
+        }
+    }
+
+    /// Unit calibration scales by the maximum and leaves the floor at zero, so
+    /// a query with no lexical signal contributes nothing. Min-max would lift
+    /// the weakest candidate to 0 and hand every document a flat bonus.
+    #[test]
+    fn unit_calibrate_scales_by_max_and_keeps_the_floor() {
+        let mut v = [2.0f32, 1.0, 0.0];
+        unit_calibrate(&mut v);
+        assert!((v[0] - 1.0).abs() < 1e-6);
+        assert!((v[1] - 0.5).abs() < 1e-6);
+        assert!(v[2].abs() < 1e-6, "zero must stay zero, unlike min-max");
+    }
+
+    /// A query with no lexical hits must not produce NaN or a flat bonus.
+    #[test]
+    fn unit_calibrate_handles_an_all_zero_arm() {
+        let mut v = [0.0f32, 0.0, 0.0];
+        unit_calibrate(&mut v);
+        assert!(v.iter().all(|x| *x == 0.0));
     }
 
     // ── summary arm (Phase 2) ────────────────────────────────────────

@@ -536,7 +536,76 @@ impl Vault {
             .keys()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        snapshot.semantic_scores_for_paths(query, &current_paths, top_k)
+        let weight = embeddings::lexical_weight();
+        if weight <= 0.0 {
+            // Default path. Untouched by the experimental hybrid setting.
+            return snapshot.semantic_scores_for_paths(query, &current_paths, top_k);
+        }
+        self.blend_lexical(query, &snapshot, &current_paths, top_k, weight)
+    }
+
+    /// Experimental hybrid ranking, only reachable when OBSIDIAN_LEXICAL_WEIGHT
+    /// is above zero.
+    ///
+    /// Candidate generation is a UNION: semantic scores the whole store and the
+    /// lexical arm contributes its own hits, so a note BM25 never surfaces is
+    /// still reachable. This is deliberately NOT the upstream BM25-gated
+    /// re-rank, which could not recover anything BM25 missed.
+    ///
+    /// Both arms are unit-calibrated before blending because the semantic score
+    /// is not a cosine: the weighted summary arm can push it to `w_sum` (1.25).
+    ///
+    /// Measured on this fork's benchmark corpus, no weight beat semantic-only,
+    /// so the default is off. See docs/PROJECT_LOG.md.
+    #[cfg(has_embeddings)]
+    fn blend_lexical(
+        &self,
+        query: &str,
+        snapshot: &embedding_runtime::EmbeddingQuerySnapshot,
+        current_paths: &std::collections::HashSet<PathBuf>,
+        top_k: usize,
+        weight: f32,
+    ) -> VaultResult<Vec<(PathBuf, f32)>> {
+        use std::collections::HashMap;
+
+        const CANDIDATE_DEPTH: usize = 200;
+        let depth = top_k.max(CANDIDATE_DEPTH);
+
+        let semantic = snapshot.semantic_scores_for_paths(query, current_paths, depth)?;
+        let lexical = match self.inner.tantivy.as_ref() {
+            Some(tv) => tv.search(query, depth).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        if lexical.is_empty() {
+            let mut semantic = semantic;
+            semantic.truncate(top_k);
+            return Ok(semantic);
+        }
+
+        let mut sem_scores: Vec<f32> = semantic.iter().map(|(_, s)| *s).collect();
+        let mut lex_scores: Vec<f32> = lexical.iter().map(|(_, s)| *s).collect();
+        embeddings::unit_calibrate(&mut sem_scores);
+        embeddings::unit_calibrate(&mut lex_scores);
+
+        let mut blended: HashMap<PathBuf, f32> = HashMap::new();
+        for ((path, _), score) in semantic.iter().zip(sem_scores) {
+            *blended.entry(path.clone()).or_insert(0.0) += (1.0 - weight) * score;
+        }
+        for ((path, _), score) in lexical.iter().zip(lex_scores) {
+            if !current_paths.contains(path) {
+                continue;
+            }
+            *blended.entry(path.clone()).or_insert(0.0) += weight * score;
+        }
+
+        let mut ranked: Vec<(PathBuf, f32)> = blended.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked.truncate(top_k);
+        Ok(ranked)
     }
 
     /// Returns `true` if embeddings are available for semantic search.
