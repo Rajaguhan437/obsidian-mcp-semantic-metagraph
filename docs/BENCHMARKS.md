@@ -144,6 +144,18 @@ monotonically as the weight rises:
 | 1.18 | .9442 | .9412 | .9754 | 31.4% |
 | **1.20** | **.9442** | **.9412** | **.9754** | **27.5%** |
 | 1.25 | .9442 | .9412 | .9754 | 18.8% |
+
+**Confirmed live**, same binary / vault / query set / index, weight as the only
+variable: every stratum delta is **+0.000** (overall .939, deep .941, casual .975,
+paraphrase .794, low-overlap .857, exact .985; R@1 .908, MRR .932 at both
+weights). Attribution measured over 608 returned hits was **27.3% at 1.20** and
+**18.6% at 1.25**, against the 27.5% / 18.8% predicted offline — within 0.2
+points, which also validates the offline sweep as a method. `best_chunk` was
+present on 100% of hits at both weights.
+
+The live overall figure is .939 rather than the .9442 computed offline; that gap
+is the Python chunker replica differing slightly from the Rust implementation,
+and it applies equally to both weights, so the comparison is unaffected.
 | 1.30 | .9491 | .9412 | .9754 | 12.2% |
 
 1.30 does score marginally higher overall (.9491) but sits directly against the

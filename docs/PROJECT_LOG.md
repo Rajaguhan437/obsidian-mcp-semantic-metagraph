@@ -572,3 +572,63 @@ summary text appeared in any response.
 
 Unchanged by this phase: chunking, scoring, hybrid behaviour, the daemon
 architecture, every graph tool, and the benchmark methodology.
+
+---
+
+## Phase 6b - live confirmation of the 1.20 default
+
+The default change was decided from vectors cached offline. This run confirmed
+it against a live server, because "computed from the same vectors the server
+would have used" is not the same claim as "the server does this".
+
+Setup: 416-note vault copy, the same 76-query set and gold, arctic-embed2 via
+Ollama behind the counting proxy, one binary, `lexical_prefetch=false`. The
+control reused the first run's index - `OBSIDIAN_SUMMARY_WEIGHT` is not part of
+the content hash, so the same vectors serve both weights and the weight is the
+only variable.
+
+| stratum | w=1.20 | w=1.25 | delta |
+|---|---|---|---|
+| overall | .939 | .939 | **+0.000** |
+| deep (past w400) | .941 | .941 | +0.000 |
+| casual/typo | .975 | .975 | +0.000 |
+| paraphrase | .794 | .794 | +0.000 |
+| low-overlap | .857 | .857 | +0.000 |
+| exact-keyword | .985 | .985 | +0.000 |
+| R@1 / R@5 / R@8 / MRR | .908 / .961 / .961 / .932 | identical | - |
+
+These also reproduce the recorded Phase-5 numbers exactly, on a binary that has
+since gained the whole provenance layer - which is independent evidence that
+provenance did not perturb ranking.
+
+Attribution, measured over 608 returned hits:
+
+| | offline prediction | live |
+|---|---|---|
+| chunk-attributable @ 1.20 | 27.5% | **27.3%** |
+| chunk-attributable @ 1.25 | 18.8% | **18.6%** |
+| hits carrying a passage | - | **100%** at both |
+
+Within 0.2 points, which validates the offline sweep as a method as well as the
+decision it drove.
+
+Cost: 501.6 s to index cold (508 embedding calls, 8,059 vectors, batch 16),
+median query 328.8 ms, peak 133 MB. The control loaded the existing index in
+**9.6 s with zero embedding calls** - cache reuse across a weight change,
+demonstrated on the real corpus rather than argued from the hash definition.
+
+### Two environment notes
+
+Ollama was unreachable from WSL: it listens on `0.0.0.0:11434`, but the Windows
+firewall blocked every route from the guest (gateway, DNS, mDNS,
+`host.docker.internal` all timed out). Resolved by switching WSL to
+`networkingMode=mirrored` in `.wslconfig`, which shares the host network stack.
+That is a persistent machine-level change, and it also removes the NAT that had
+been severing large HTTPS transfers earlier in this project.
+
+Under mirrored networking WSL and Windows share ports, so the harness's proxy
+failed to bind: a leftover Windows-side proxy already held 11500. The run still
+measured correctly - that process is the same script, and it honours the same
+`/__reset` endpoint the harness calls - but its counters landed in a different
+stats file, which is why the harness reported 0 embedding calls while 508 were
+actually made. Worth knowing before reading a cost column as authoritative.

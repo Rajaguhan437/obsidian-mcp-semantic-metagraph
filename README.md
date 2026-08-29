@@ -113,12 +113,18 @@ passage is not a claim that it ranked; `match_type` carries that, and
 dominate the response for no retrieval benefit; use `note_read` when the whole
 note is wanted.
 
-**How often is a result attributable to a passage?** On the development corpus,
-**27.5% of top-8 hits** at the default weight — the rest ranked on their summary.
-That share is set by `OBSIDIAN_SUMMARY_WEIGHT`, and it is why the default is 1.20
-rather than 1.25 (identical ranking, 46% more attributable results). Lowering it
-further trades ranking quality for attribution: at `1.0`, 86% of hits are
-chunk-attributable but casual/typo retrieval drops from .975 to .888.
+**Every hit carries a passage; not every hit is *attributable* to one.**
+Measured live over 608 hits on the development corpus: `best_chunk` was present
+on **100%**, while **27.3%** had `match_type: "chunk"` — the rest ranked on their
+summary. So an agent always has a passage to read; roughly a quarter of the time
+that passage is also the reason the note surfaced.
+
+That attribution share is set by `OBSIDIAN_SUMMARY_WEIGHT`, and it is why the
+default is 1.20 rather than 1.25: ranking is **bit-identical** between the two
+(verified live — every stratum delta +0.000) while attribution rises from 18.6%
+to 27.3%. Lowering the weight further trades ranking for attribution: at `1.0`
+most hits become chunk-attributable, but casual/typo retrieval drops from .975 to
+.888.
 
 **Cost.** Roughly +117% response bytes at `top_k=5` without content (1,764 →
 3,836 bytes, ~518 tokens), median 206 bytes of evidence per result.
