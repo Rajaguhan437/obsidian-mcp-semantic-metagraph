@@ -4,7 +4,7 @@ Durable record of this work, written so the project survives conversation
 compaction. Everything here is reconstructed from measurements taken during the
 work, not from memory. Keep it updated as phases land.
 
-**Last updated:** 2026-08-29, end of Phase 3.
+**Last updated:** 2026-08-29, end of Phase 5 (pre-publication).
 
 ---
 
@@ -375,6 +375,16 @@ Tests: **672 unit, 0 fail, 1 ignored (Windows-only, pre-existing)**, plus 60
 integration and 1 doc test.
 
 - **Phase 3** — settled: semantic-only default, opt-in lexical weight.
+- **Phase 4** — settled: **daemon retained**. It is a transport/lifecycle wrapper
+  around the same engine (`daemon/vault_context.rs` holds an `EmbeddingRuntime`
+  and calls the same `semantic_scores_for_paths` / `score_for`), so it inherits
+  every improvement automatically. Its value — one shared model across clients —
+  is real for the `local` provider and largely redundant for an API provider.
+  Two corrections came out of it: my "38 references in the retrieval path" figure
+  was wrong (10 production, 28 test), and the audit found that Phase 2 had
+  unbalanced **both** pre-existing hybrid blends by letting the semantic score
+  reach 1.25. Fixed with `blend_score_for()`.
+- **Phase 5** — final validation and release documentation. Complete.
 - **Phase 4** — daemon/client architecture. Not started. Map the 5,147 LOC and
   71 references (38 in `src/tools/search.rs`) before assuming removal is wanted.
 - **Phase 5** — final validation and GitHub release prep. Not started.
@@ -382,3 +392,33 @@ integration and 1 doc test.
 Target architecture for agents: semantic retrieval for meaning, explicit lexical
 tools for exact matching, graph tools for relationships, and experimental hybrid
 ranking behind a flag.
+
+
+---
+
+## 14. Phase 5 — final validation
+
+Run against the frozen Phase-4 binary.
+
+| check | result |
+|---|---|
+| unit tests | 676 pass, 0 fail, 1 ignored |
+| binary tests | 1 pass |
+| integration tests | 60 pass |
+| doc tests | 0 (none defined) |
+| **total** | **737 pass, 0 fail, 1 ignored** |
+| retrieval benchmark | overall .939, deep .941, casual .975, paraphrase .794, low-overlap .857, exact .985 — identical to the Phase-2 control |
+| graph integrity | 0 order-insensitive diffs vs the accepted Phase 0-1 baseline |
+| cache warm restart | 3.2 s, 0 documents re-embedded |
+| MCP tools | 19/19 registered, 22/22 invocations pass |
+| retrieval paths | semantic, lexical, hybrid all OK |
+| semantic modes | `local` OK, `auto` OK; `daemon` needs the IPC endpoint, not exercised |
+
+Note on tool verification: the first pass showed 6 "failures" that were entirely
+**my own wrong parameter names** — every error was `missing field X`. The tools
+were returning precise validation errors, which is itself evidence they are
+correctly wired. Corrected parameters in `docs/TOOLS.md`.
+
+Release documentation written: `README.md`, `docs/ARCHITECTURE.md`,
+`docs/BENCHMARKS.md`, `docs/FIXES.md`, `docs/TOOLS.md`. Upstream's original
+README preserved at `docs/UPSTREAM_README.md`.

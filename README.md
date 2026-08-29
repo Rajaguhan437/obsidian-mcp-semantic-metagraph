@@ -1,633 +1,299 @@
-# obsidian-mcp
+# obsidian-mcp (chunk-level retrieval fork)
 
-[![CI](https://github.com/lstpsche/obsidian-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/lstpsche/obsidian-mcp/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/obsidian-mcp.svg)](https://crates.io/crates/obsidian-mcp)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+An MCP server giving AI agents semantic search, lexical search, and graph
+navigation over an Obsidian vault — reading the vault directly from disk, with no
+Obsidian plugin and no REST API.
 
-A high-performance [MCP](https://modelcontextprotocol.io) server that gives AI agents full read/write access to [Obsidian](https://obsidian.md) vaults. Written in Rust. Ships as a single binary.
+This is a **fork of [lstpsche/obsidian-mcp](https://github.com/lstpsche/obsidian-mcp)**
+that rebuilds the semantic retrieval layer. Upstream embedded one vector per note
+from a body truncated to 400 words; this fork indexes the whole note as
+heading-aware chunks and keeps a note-level summary vector alongside them.
 
-**No Obsidian plugins. No REST API. No Obsidian running. Just your vault on disk.**
+On the vault it was developed against that moved retrieval nDCG from **0.834 to
+0.939**, and on queries whose answer sits past the truncation point, from
+**0.552 to 0.941**.
 
-## Why?
+> **Read this before trusting those numbers.** They come from **one vault (416
+> notes), 76 queries, and one embedding model**. That is evidence from a specific
+> corpus, not a general claim. Several results were measurably corpus-dependent,
+> and one change that looked clearly beneficial on paper made things worse here.
+> See [Known limitations](#known-limitations) and [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-Existing solutions for AI + Obsidian require the Obsidian app to be running with a community plugin ([obsidian-local-rest-api](https://github.com/coddingtonbear/obsidian-local-rest-api)) and an MCP wrapper ([mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian)) on top. That's fragile, slow, and limited to what the REST API exposes.
+---
 
-obsidian-mcp talks directly to the filesystem. It understands the Obsidian format natively — wikilinks, frontmatter, tags, block references, periodic notes, the full graph. It builds fast in-memory indices on startup and keeps them synced via a filesystem watcher. The result is a single dependency-free binary that works whether Obsidian is open or not.
+## What it gives an agent
 
-## Quick Start
+Four capabilities, deliberately kept separate rather than merged behind one
+ranking function:
 
-```sh
-# Install
-cargo install obsidian-mcp
+| | for | tools |
+|---|---|---|
+| **Semantic retrieval** | meaning-based questions, paraphrase, vague recall | `search_semantic` |
+| **Lexical search** | exact strings, identifiers, terminology, regex | `search_text`, `search_regex`, `search_metadata` |
+| **Graph navigation** | relationships between notes | `wikilinks`, `note_inspect`, `frontmatter` |
+| **Note operations** | read, create, edit, move, patch | `note_*`, `vault_*`, `periodic` |
 
-# Run (stdio — for MCP clients that launch the process)
-obsidian-mcp /path/to/your/vault
+Keeping lexical search as its *own tool* rather than blending it into semantic
+ranking was a measured decision — see
+[Why hybrid ranking is off](#why-hybrid-ranking-is-off-by-default).
 
-# Run (HTTP — shared server for multiple agents)
-obsidian-mcp --http /path/to/your/vault
+## Retrieval architecture
+
+Each note contributes **chunks plus one summary**:
+
+- **Chunks** — heading-aware, ~1000 characters with 200 overlap, each carrying a
+  breadcrumb (`Title > H1 > H2`) so the embedding keeps its structural context.
+  Code fences are respected, so `#` inside a fenced block is never mistaken for a
+  heading, and no chunk can exceed a hard ceiling whatever the note looks like.
+- **Summary** — `title + all headings + first 400 words`. This is upstream's
+  original representation, kept deliberately.
+
+Scoring combines them:
+
+```
+score(note) = max( max_i cos(q, chunk_i),  w_sum * cos(q, summary) )
 ```
 
-Add to your MCP client config (Cursor, Claude Desktop, etc.) and you're done — 19 tools are available immediately.
+`max` rather than a weighted sum is the load-bearing choice. Max is **monotone**,
+so the summary can rescue a note but can never dilute one whose answer lives in a
+single chunk — exactly the failure a weighted sum reintroduces.
 
-## What It Can Do
+Why keep a summary at all? Chunking alone *regressed* what whole-note embedding
+was good at: typo-heavy queries fell 0.930 → 0.875 and title-shaped lookups
+suffered. The summary arm recovered them (to 0.975) without giving up any of the
+deep-content gain.
 
-| Category | Capabilities |
-|----------|-------------|
-| **Navigate** | List files, tree view, vault stats |
-| **Read & write** | Create, read, overwrite, append, prepend, move, delete notes |
-| **Patch** | Edit individual heading sections, block references, or frontmatter fields without touching the rest of the note |
-| **Search** | BM25 full-text (Tantivy) with stemming, fuzzy matching, and per-field filtering. Semantic search via managed local or API embeddings. Regex. Tag and frontmatter queries. |
-| **Graph** | Backlinks, outgoing links, broken link detection, orphan discovery |
-| **Frontmatter** | Get/set/remove fields, query notes by metadata |
-| **Periodic notes** | Daily, weekly, monthly, quarterly, yearly — with Obsidian-compatible date formats and template expansion |
+Detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Metadata and BM25 indices update immediately through the filesystem watcher. Embeddings reconcile asynchronously through a managed background runtime, so model loading, inference, and cache writes never delay MCP startup or core tools.
+## Install
 
-## Installation
+Requires Rust. Embedding backends are **not** enabled by default:
 
-### From crates.io
+```bash
+# API-backed embeddings (Ollama, OpenAI, LM Studio, vLLM — any OpenAI-compatible endpoint)
+cargo install --path . --features embeddings-api
 
-```sh
-cargo install obsidian-mcp
+# or local in-process embeddings (fastembed)
+cargo install --path . --features embeddings
 ```
 
-For **semantic search local compatibility mode** (`OBSIDIAN_SEMANTIC_MODE=local`), build with embeddings:
+Building with neither feature yields a server with lexical and graph tools but no
+semantic search.
 
-```sh
-cargo install obsidian-mcp --features embeddings
+### Quick start with Ollama
+
+```bash
+ollama pull snowflake-arctic-embed2
+
+export OBSIDIAN_VAULT_PATH="/path/to/vault"
+export OBSIDIAN_EMBEDDINGS=true
+export OBSIDIAN_EMBEDDING_PROVIDER=api
+export OBSIDIAN_EMBEDDING_API_BASE=http://localhost:11434/v1
+export OBSIDIAN_EMBEDDING_API_MODEL=snowflake-arctic-embed2:latest
+export OBSIDIAN_EMBEDDING_API_KEY=ollama      # Ollama ignores the value
+export OBSIDIAN_EMBEDDING_DIM=1024
+
+obsidian-mcp                # stdio transport
+obsidian-mcp --http         # streamable HTTP on :37842
 ```
 
-The `embeddings` feature adds ~60 MB to the binary (ONNX Runtime). In daemon mode, model/runtime cache is shared under semantic home; local mode keeps in-process embedding support in the MCP binary.
-
-On Windows, local embeddings builds require a recent MSVC Build Tools toolset for ONNX Runtime. MSVC 14.44+ is known to work; older VS 2019-era 14.2x toolsets may fail to link with `__std_find_trivial_8`. Use `--features embeddings-api` instead if you want semantic search through an external `/v1/embeddings` server without bundling ONNX Runtime.
-
-For **API embedding backend** (OpenAI, Ollama, vLLM, LM Studio, or any `/v1/embeddings`-compatible endpoint):
-
-```sh
-cargo install obsidian-mcp --features embeddings-api
-```
-
-This adds no model weight to the binary — embeddings are computed by an external server. Both features can be compiled simultaneously; `OBSIDIAN_EMBEDDING_PROVIDER` selects which runs.
-
-#### API backend examples
-
-```sh
-# OpenAI
-OBSIDIAN_EMBEDDINGS=true
-OBSIDIAN_EMBEDDING_PROVIDER=api
-OBSIDIAN_EMBEDDING_API_KEY=sk-...
-OBSIDIAN_EMBEDDING_API_MODEL=text-embedding-3-small
-
-# Ollama (local, no auth)
-OBSIDIAN_EMBEDDINGS=true
-OBSIDIAN_EMBEDDING_PROVIDER=api
-OBSIDIAN_EMBEDDING_API_BASE=http://localhost:11434/v1
-OBSIDIAN_EMBEDDING_API_MODEL=nomic-embed-text
-OBSIDIAN_EMBEDDING_API_KEY=unused
-
-# vLLM / LM Studio
-OBSIDIAN_EMBEDDINGS=true
-OBSIDIAN_EMBEDDING_PROVIDER=api
-OBSIDIAN_EMBEDDING_API_BASE=http://localhost:8000/v1
-OBSIDIAN_EMBEDDING_API_MODEL=BAAI/bge-small-en-v1.5
-OBSIDIAN_EMBEDDING_API_KEY=unused
-
-# OpenRouter (25+ embedding models from multiple providers)
-OBSIDIAN_EMBEDDINGS=true
-OBSIDIAN_EMBEDDING_PROVIDER=api
-OBSIDIAN_EMBEDDING_API_BASE=https://openrouter.ai/api/v1
-OBSIDIAN_EMBEDDING_API_MODEL=openai/text-embedding-3-small
-OBSIDIAN_EMBEDDING_API_KEY=sk-or-v1-...
-```
-
-### Pre-built binaries
-
-Grab the latest from [GitHub Releases](https://github.com/lstpsche/obsidian-mcp/releases/latest):
-
-| Platform | Archive |
-|----------|---------|
-| Linux x86_64 | `obsidian-mcp-<version>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `obsidian-mcp-<version>-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Intel | `obsidian-mcp-<version>-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `obsidian-mcp-<version>-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `obsidian-mcp-<version>-x86_64-pc-windows-msvc.zip` |
-
-Semantic daemon release assets are also published per target:
-
-- `obsidian-semanticd-<version>-<target>.tar.gz` (Unix)
-- `obsidian-semanticd-<version>-<target>.zip` (Windows)
-
-### Install from source (edge)
-
-If you have the repo cloned, you can install the latest `main` build locally:
-
-```sh
-./bin/install-edge
-```
-
-This pulls the latest `main` and runs `cargo install --path . --features embeddings`.
-
-## Semantic Runtime Compatibility
-
-Current semantic daemon API version: `1` (`DAEMON_API_VERSION` in `src/daemon/protocol.rs`).
-
-| Component | Compatibility contract | Enforcement |
-|----------|-------------------------|-------------|
-| `obsidian-mcp` | Daemon API version must match exactly | MCP daemon `health` handshake validates `min_api_version`/`max_api_version` against current API version and fails fast on mismatch |
-| `obsidian-semantic-search-plugin` | Daemon API version must match exactly | Plugin bootstrap performs daemon `health` handshake and surfaces explicit incompatibility notices |
-
-Release asset compatibility expectations:
-
-- Daemon auto-install clients expect release assets named `obsidian-semanticd-<version>-<target>.{tar.gz|zip}` plus `checksums.sha256`.
-- Plugin releases should publish `main.js`, `manifest.json`, and optional `styles.css` as GitHub release assets.
-
-Upgrade guidance:
-
-- Use `obsidian-mcp upgrade` for Cargo-installed `obsidian-mcp` and `obsidian-semanticd` binaries; it preserves the compiled feature set and reconciles the locally owned daemon.
-- Upgrade `obsidian-semantic-search-plugin` through Obsidian's plugin manager.
-- If versions are skewed, startup/handshake fails with explicit API incompatibility errors rather than silent fallback.
-
-## Transport Modes
-
-obsidian-mcp supports two transports. Both are always compiled in — choose the one that fits your workflow.
-
-### stdio (default)
-
-The standard MCP transport. The AI client spawns the process and communicates over stdin/stdout.
-
-**Use when:** your MCP client manages the server process (Cursor, Claude Desktop, most MCP clients).
-
-```sh
-obsidian-mcp /path/to/vault
-```
-
-Each client connection spawns its own process. Simple, zero-config, works everywhere.
-
-### Streamable HTTP
-
-A persistent HTTP server that multiple clients can connect to simultaneously.
-
-**Use when:** you run multiple headless agents (`cursor agent -p`, parallel Claude sessions, etc.) against the same vault and want to share a single server process instead of spawning one per agent.
-
-```sh
-# Foreground (for development / process managers like launchd, systemd)
-obsidian-mcp --http /path/to/vault
-
-# Background (ad-hoc daemonize — spawns child, parent exits)
-obsidian-mcp serve /path/to/vault
-```
-
-The `serve` command daemonizes the server and redirects logs to a platform-specific file:
-- **macOS:** `~/Library/Logs/obsidian-mcp.log`
-- **Linux:** `$XDG_STATE_HOME/obsidian-mcp/obsidian-mcp.log`
-- **Windows:** `%LOCALAPPDATA%/obsidian-mcp/obsidian-mcp.log`
-
-Default: `http://127.0.0.1:37842`. MCP tools are served at `/mcp`, health check at `/health`.
-
-Benefits over stdio for multi-agent setups:
-- **Shared index** — one in-memory BM25/embedding index instead of N copies
-- **Lower resource usage** — single filesystem watcher, single process
-- **Process independence** — server stays up when agents come and go
-- **Standard observability** — HTTP health checks, logging, standard networking
-
-Configure the address:
-
-```sh
-obsidian-mcp --http --port 9000 --host 0.0.0.0 /path/to/vault
-# or via env vars
-OBSIDIAN_TRANSPORT=http OBSIDIAN_HTTP_PORT=9000 obsidian-mcp /path/to/vault
-```
-
-### Server Management
-
-```sh
-obsidian-mcp serve /path/to/vault    # Start HTTP server in background
-obsidian-mcp stop                    # Stop running server (default port)
-obsidian-mcp stop --port 9000        # Stop server on specific port
-obsidian-mcp restart /path/to/vault  # Stop + start (picks up new binary after upgrade)
-```
-
-`serve` and `restart` wait for the server to pass a `/health` check before reporting success (up to 15s). If the server fails during startup, the exit code and log path are reported.
-
-## Client Setup
-
-### Cursor (stdio)
-
-`~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "command": "obsidian-mcp",
-      "args": ["/path/to/your/vault"]
-    }
-  }
-}
-```
-
-### Cursor (HTTP — shared server)
-
-Start the server once:
-
-```sh
-obsidian-mcp serve /path/to/your/vault
-```
-
-Then point Cursor at it:
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "url": "http://127.0.0.1:37842/mcp"
-    }
-  }
-}
-```
-
-All Cursor agents (IDE, CLI, headless) share the same server.
-
-### Claude Desktop
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "command": "obsidian-mcp",
-      "env": {
-        "OBSIDIAN_VAULT_PATH": "/path/to/your/vault",
-        "OBSIDIAN_EMBEDDINGS": "true"
-      }
-    }
-  }
-}
-```
-
-Config file location:
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-### Any MCP client
-
-obsidian-mcp supports both **stdio** and **Streamable HTTP** MCP transports. Any MCP-compatible client can connect via either method. Pass the vault path as the first argument or via `OBSIDIAN_VAULT_PATH`.
-
-## Running as a Service
-
-For always-on HTTP mode, use your OS process manager with `--http` (not `serve`). This lets the process manager handle restarts, logging, and lifecycle — `serve` daemonizes itself, which conflicts with process managers that expect to own the child process.
-
-### macOS (launchd)
-
-Create `~/Library/LaunchAgents/com.obsidian-mcp.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.obsidian-mcp</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/YOU/.cargo/bin/obsidian-mcp</string>
-    <string>--http</string>
-  </array>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>OBSIDIAN_VAULT_PATH</key>
-    <string>/path/to/your/vault</string>
-    <!-- Add embedding env vars here if using API embeddings:
-    <key>OBSIDIAN_EMBEDDINGS</key>
-    <string>true</string>
-    <key>OBSIDIAN_EMBEDDING_PROVIDER</key>
-    <string>api</string>
-    <key>OBSIDIAN_EMBEDDING_API_KEY</key>
-    <string>sk-...</string>
-    <key>OBSIDIAN_EMBEDDING_API_BASE</key>
-    <string>https://api.openai.com/v1</string>
-    <key>OBSIDIAN_EMBEDDING_API_MODEL</key>
-    <string>text-embedding-3-small</string>
-    -->
-  </dict>
-
-  <key>RunAtLoad</key>
-  <true/>
-
-  <key>KeepAlive</key>
-  <true/>
-
-  <key>StandardOutPath</key>
-  <string>/Users/YOU/Library/Logs/obsidian-mcp/launchd.out.log</string>
-
-  <key>StandardErrorPath</key>
-  <string>/Users/YOU/Library/Logs/obsidian-mcp/launchd.err.log</string>
-</dict>
-</plist>
-```
-
-> **Important:** launchd does not source your shell profile (`~/.zshrc`, `~/.bashrc`). All environment variables must be defined in the plist's `EnvironmentVariables` section.
-
-```sh
-# Load
-launchctl load ~/Library/LaunchAgents/com.obsidian-mcp.plist
-
-# Unload (stop)
-launchctl unload ~/Library/LaunchAgents/com.obsidian-mcp.plist
-
-# A direct, running user LaunchAgent is restarted automatically by:
-obsidian-mcp upgrade
-```
-
-### Linux (systemd)
-
-Create `~/.config/systemd/user/obsidian-mcp.service`:
-
-```ini
-[Unit]
-Description=obsidian-mcp MCP server
-After=network.target
-
-[Service]
-ExecStart=%h/.cargo/bin/obsidian-mcp --http
-Environment=OBSIDIAN_VAULT_PATH=/path/to/your/vault
-# Add embedding env vars if needed:
-# Environment=OBSIDIAN_EMBEDDINGS=true
-# Environment=OBSIDIAN_EMBEDDING_PROVIDER=api
-# Environment=OBSIDIAN_EMBEDDING_API_KEY=sk-...
-# Environment=OBSIDIAN_EMBEDDING_API_BASE=https://api.openai.com/v1
-# Environment=OBSIDIAN_EMBEDDING_API_MODEL=text-embedding-3-small
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now obsidian-mcp
-
-# Check status
-systemctl --user status obsidian-mcp
-
-# A direct, running user service is restarted automatically by:
-obsidian-mcp upgrade
-
-# View logs
-journalctl --user -u obsidian-mcp -f
-```
-
-## Upgrading
-
-```sh
-# Inspect the verified install and exact command without changing anything
-obsidian-mcp upgrade --dry-run
-
-# Install the latest crates.io version and activate it
-obsidian-mcp upgrade
-```
-
-`upgrade` supports official crates.io installations recorded in Cargo's install tracker. It preserves the current target, build profile, and exact compiled feature set; verifies both shipped binaries after Cargo finishes; restarts directly managed running launchd/systemd user services; and reconciles a locally owned semantic daemon without changing its home, model, or caches. Explicit semantic-daemon overrides and PATH-owned daemons are left alone.
-
-Vault settings and service definitions are never rewritten. Stdio clients cannot be restarted from inside their active protocol session, so reconnect them after an update. An ad-hoc background process started with `obsidian-mcp serve` must also be restarted with the same arguments or environment; the upgrader cannot safely reconstruct that launch context. If installation succeeds but activation fails, the command exits non-zero with diagnostics and does not silently roll back the Cargo installation.
-
-Homebrew, Nix, source/path, Git, alternate-registry, and pre-built binary installs are rejected before mutation. Upgrade those through the tool that owns the installation.
-
-See [Upgrading](docs/upgrading.md) for the support matrix, guarantees, outcomes, and recovery guidance.
-
-## Search
-
-Three tiers, each suited to different needs.
-
-### BM25 Full-Text — `search_text`
-
-On by default. Powered by [Tantivy](https://github.com/quickwit-oss/tantivy), rebuilt in-memory on startup (< 100 ms for 5k notes).
-
-- **Stemming** — "deploy" matches "deployment", "deployed", "deploying"
-- **Field boosts** — title 5x, tags 4x, headings 3x, frontmatter 2x, body 1x
-- **Fuzzy matching** — `fuzzy: true` tolerates single-character typos (edit distance 1)
-- **Field filtering** — `fields: ["title", "tags"]` to restrict scope
-- Returns ranked results with context snippets and match offsets
-
-### Semantic — `search_semantic`
-
-Uses the shared local semantic daemon by default (`OBSIDIAN_SEMANTIC_MODE=auto`). Results keep the same MCP schema while backend execution can run through daemon or local compatibility mode.
-
-Semantic runtime modes:
-
-- `auto` (default): prefer daemon, fallback to local in-process embeddings only when the daemon is genuinely unavailable and local embeddings are enabled. A daemon that is attached but warming does not start a competing local index.
-- `daemon`: daemon-only path; semantic calls fail clearly if daemon is unavailable.
-- `local`: force the in-process embedding runtime.
-
-Daemon startup policy:
-
-- MCP only initializes/starts the daemon when `OBSIDIAN_WATCH=true`.
-- When `OBSIDIAN_WATCH=false`, MCP skips daemon initialization and semantic search must use local mode (if enabled) or returns a clear error.
-
-Embedding lifecycle:
-
-| Phase | Queryable | Meaning |
-|-------|-----------|---------|
-| `warming` | No | The model is loading or the first verified index is being built. A semantic query returns an explicit retryable not-ready error. |
-| `warming` | Yes | A same-space last-known-good cache is serving queries while changed notes reconcile in the background. |
-| `ready` | Yes | Every currently indexed note has completed reconciliation. An empty vault is also ready. |
-| `degraded` | Yes or no | Some work failed. Verified last-known-good/partial vectors remain usable when any exist. Note-read, inference, and persistence failures retry; a model-load/configuration failure requires correction and restart. |
-
-Core note, graph, BM25, write, and MCP initialization behavior stays available in every phase. Repeated note changes are coalesced by path, and the newest write or removal wins over in-flight inference.
-
-Embedding caches are versioned and atomically replaced. A cache is reusable only when its backend, canonical model, vector dimension, embedding-input version, and—for API backends—the normalized endpoint fingerprint all match. Legacy payloads, incomplete first-pass checkpoints, corrupt data, and mismatched identities are never published; they trigger a one-time background rebuild. Cache locations do not change: local mode uses `{mcp_data}/embeddings/embeddings.bin`, while the daemon uses `<semantic-home>/vaults/<vault_id>/embeddings.bin`. Legacy-location relocation is non-destructive, runs behind the background coordinator, and publishes through the same atomic no-partial-file boundary.
-
-For a remote API, the identity can prove the configured endpoint and model name, but it cannot detect a provider silently replacing model weights behind the same name. Change the configured model identifier (or remove the derived cache) when a provider makes such a revision.
-
-- Finds notes by **meaning**, not keywords — "making money from software" surfaces notes about monetization
-- **Hybrid mode** — `lexical_prefetch: true` combines BM25 candidate retrieval with semantic re-ranking
-- **Tunable blending** — `alpha` controls the weight between lexical and semantic scores (default 0.25)
-- Daemon cache-location migration is one-way and non-destructive: the active local cache is preferred, then legacy `.obsidian/obsidian-mcp/embeddings.bin`; relocation runs in the background, never overwrites an existing daemon cache, and an old payload format is rebuilt rather than trusted
-
-### Regex — `search_regex`
-
-Always available. Full regex syntax for pattern matching across all notes.
-
-### When to Use What
-
-| Need | Tool |
-|------|------|
-| Known keyword or phrase | `search_text` |
-| Keyword with possible typo | `search_text` + `fuzzy: true` |
-| Conceptual — "notes about X" | `search_semantic` |
-| Best precision + recall | `search_semantic` + `lexical_prefetch: true` |
-| Structural pattern (URLs, IDs) | `search_regex` |
-| By tag or metadata | `search_metadata` |
-
-## Tool Reference
-
-<details>
-<summary><strong>All 19 tools</strong> (click to expand)</summary>
-
-### Navigation
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `vault_list` | `path?`, `recursive?`, `glob?`, `format?`, `max_depth?`, `include_metadata?` | List files (`format: "list"`) or tree view (`format: "tree"`) |
-| `vault_info` | — | Aggregate vault statistics |
-
-`vault_list` keeps its default JSON string-array response. With `include_metadata: true` in list mode, each indexed Markdown note instead includes `path`, filename-stem `title`, `tags`, `size`, and available filesystem timestamps from the existing index without loading note bodies. Directories, non-Markdown files, and unindexed or excluded notes remain path-only objects. Metadata is not supported in tree mode.
-
-### Note CRUD
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `note_read` | `path` | Read full note content |
-| `note_read_many` | exactly one of `paths` or `dir`; `recursive?`, `glob?`, `max_files?`, `max_bytes?` | Read a bounded batch with per-path skip reasons |
-| `note_create` | `path`, `content?`, `frontmatter?` | Create a new note |
-| `note_write` | `path`, `content` | Overwrite note content |
-| `note_insert` | `path`, `content`, `position?` | Insert at end (`"end"`, default) or beginning (`"beginning"`) |
-| `note_patch` | `path`, `operation`, `target_type`, `target`, `content` | Patch a heading section, block ref, or frontmatter field |
-| `note_delete` | `path`, `confirm` | Delete a note (requires `confirm: true`) |
-| `note_move` | `from`, `to` | Move or rename a note |
-
-`note_read_many` preserves explicit path order or uses sorted directory order; directory reads are non-recursive by default. It inspects 20 files and returns up to 65,536 content bytes by default, with hard caps of 100 files and 262,144 content bytes. `max_bytes` counts only the UTF-8 bytes in returned note content. The response includes `notes`, bounded `skipped` details (at most 100), total `skipped_count`, and `content_bytes`. Oversized notes are skipped—even when first—and can be fetched deliberately with `note_read`. The typed MCP result is emitted as both `structuredContent` and compatibility JSON text.
-
-For `note_patch` heading targets, bare heading text such as `"Log"` is canonical. ATX marker-prefixed targets such as `"## Log"` are also accepted, so headings copied from `note_inspect` with `view: "targets"` can be used directly.
-
-### Search
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `search_text` | `query`, `fuzzy?`, `fields?`, `context_length?`, `max_results?` | BM25 full-text search with stemming |
-| `search_semantic` | `query`, `top_k?`, `include_content?`, `lexical_prefetch?`, `alpha?` | Semantic similarity search |
-| `search_regex` | `pattern`, `context_length?`, `max_results?` | Regex pattern search |
-| `search_metadata` | `type`, `tag?`, `include_nested?`, `field?`, `value?`, `operator?` | Find by tag (`type: "tag"`) or frontmatter (`type: "frontmatter"`) |
-
-### Introspection & Frontmatter
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `note_inspect` | `path`, `view?` | Metadata (`"metadata"`, default) or patchable targets (`"targets"`) |
-| `frontmatter` | `action`, `path`, `key?`, `value?` | Get (`"get"`), set (`"set"`), or remove (`"remove"`) frontmatter fields |
-
-### Graph & Links
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `wikilinks` | `query`, `path?` | Backlinks, outgoing, broken, or orphans (`query: "backlinks"/"outgoing"/"broken"/"orphans"`) |
-
-### Periodic Notes
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `periodic` | `action`, `period`, `date?`, `content?`, `limit?` | Get, create, or list periodic notes (`action: "get"/"create"/"list"`) |
-
-### Utility
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `open_in_obsidian` | `path`, `new_leaf?` | Open note in Obsidian via `obsidian://` URI |
-
-</details>
-
-## Tool Filtering
-
-Control which tools are exposed via the `OBSIDIAN_TOOLS` environment variable or per-session `X-Obsidian-Tools` HTTP header.
-
-| Value | Effect |
-|-------|--------|
-| `full` (or unset) | All 19 tools |
-| `core` | 15 tools — drops `search_semantic`, `wikilinks`, `periodic`, `open_in_obsidian` |
-| `read` | 11 tools — read-only (no create/write/insert/patch/delete/move) |
-| `minimal` | 6 tools — `vault_list`, `vault_info`, `note_read`, `note_create`, `note_write`, `search_text` |
-| `tool1,tool2,...` | Allow-list — only the named tools |
-| `!tool1,!tool2,...` | Deny-list — all tools except the named ones |
+First index of ~400 notes takes a few minutes; later starts reuse the cache and
+are near-instant.
 
 ## Configuration
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `OBSIDIAN_VAULT_PATH` | Yes* | — | Absolute path to your Obsidian vault |
-| `OBSIDIAN_TRANSPORT` | No | `stdio` | Transport mode: `stdio` or `http` |
-| `OBSIDIAN_HTTP_PORT` | No | `37842` | HTTP listen port |
-| `OBSIDIAN_HTTP_HOST` | No | `127.0.0.1` | HTTP bind address |
-| `OBSIDIAN_WATCH` | No | `true` | Filesystem watcher for live index updates |
-| `OBSIDIAN_LOG_LEVEL` | No | `info` | `trace`, `debug`, `info`, `warn`, `error` |
-| `OBSIDIAN_TANTIVY` | No | `true` | BM25 full-text index |
-| `OBSIDIAN_TOOLS` | No | `full` | Tool filtering: profile name, comma-separated allow-list, or `!`-prefixed deny-list |
-| `OBSIDIAN_MCP_DATA` | No | `{vault}/.obsidian-mcp` | External obsidian-mcp data directory. When set, cache/config data is stored under `{value}/vaults/{vault_slug}/` and merged with vault-local config |
-| `OBSIDIAN_EXCLUDE_PATHS` | No | *(empty)* | Comma-separated glob patterns excluded from indexing, search, graph, and stats. Merged with `.obsidian-mcp/ignore`; restart after changing ignore files |
-| `OBSIDIAN_EMBEDDINGS` | No | `false` | Semantic embedding search (requires `embeddings` or `embeddings-api` feature) |
-| `OBSIDIAN_EMBEDDINGS_MODEL` | No | `BAAI/bge-small-en-v1.5` | HuggingFace model for embeddings |
-| `OBSIDIAN_EMBEDDING_PROVIDER` | No | *(infer)* | Embedding backend: `local` (fastembed) or `api` (OpenAI-compatible) |
-| `OBSIDIAN_EMBEDDING_API_KEY` | When api | Fallback: `OPENAI_API_KEY` | API authentication key |
-| `OBSIDIAN_EMBEDDING_API_BASE` | No | `https://api.openai.com/v1` | Embedding API base URL (fallback: `OPENAI_BASE_URL`) |
-| `OBSIDIAN_EMBEDDING_API_MODEL` | When api | Fallback: `OPENAI_MODEL` | Model name for embedding API |
-| `OBSIDIAN_EMBEDDING_DIM` | No | *(probed)* | Override embedding dimension (skips API probe) |
-| `OBSIDIAN_EMBEDDING_CA_CERT` | No | — | Path to PEM CA certificate for API TLS |
-| `OBSIDIAN_EMBEDDING_TLS_VERIFY` | No | `true` | Set to `false` to skip TLS verification |
-| `OBSIDIAN_SEMANTIC_MODE` | No | `auto` | Semantic backend mode: `auto`, `daemon`, `local` |
-| `OBSIDIAN_SEMANTIC_HOME` | No | OS data-dir default | Shared semantic runtime home for daemon bin/model/cache state |
-| `OBSIDIAN_SEMANTIC_DAEMON_PATH` | No | unset | Override daemon binary path used by bootstrap |
-| `OBSIDIAN_SEMANTIC_DAEMON_DOWNLOAD_URL` | No | `https://github.com/lstpsche/obsidian-mcp/releases/download/v<version>/obsidian-semanticd-<version>-<target>.<ext>` | Override daemon download URL when binary is missing |
-| `OBSIDIAN_SEMANTIC_MODEL` | No | `BAAI/bge-small-en-v1.5` | Default model used by semantic daemon runtime |
-| `OBSIDIAN_SEMANTIC_ENDPOINT` | No | `<semantic-home>/ipc/...` | Daemon-only endpoint override (internal/runtime use) |
-| `OBSIDIAN_SEMANTIC_CONNECT_TIMEOUT_MS` | No | `2000` | Per-call daemon timeout in milliseconds |
-| `OBSIDIAN_SEMANTIC_CONNECT_RETRIES` | No | `2` | Daemon retry attempts after the first failed call |
-| `OBSIDIAN_SEMANTIC_RETRY_BACKOFF_MS` | No | `250` | Base retry backoff in milliseconds |
-| `OBSIDIAN_SEMANTIC_PREFETCH` | No | `50` | Default lexical prefetch candidate count for hybrid daemon queries |
-| `OBSIDIAN_SEMANTIC_ALPHA` | No | `0.25` | Default hybrid blend weight (`alpha * BM25 + (1-alpha) * semantic`) |
-| `OBSIDIAN_HYBRID_ALPHA` | No | alias | Backward-compatible alias for `OBSIDIAN_SEMANTIC_ALPHA` |
-| `FASTEMBED_CACHE_DIR` | No | `<semantic-home>/model/fastembed-cache` | Daemon-internal shared fastembed cache root |
+### Retrieval
 
-\* Also accepted as the first CLI argument: `obsidian-mcp /path/to/vault`
+| variable | default | notes |
+|---|---|---|
+| `OBSIDIAN_SUMMARY_WEIGHT` | `1.25` | Weight of the summary arm. Tested plateau **1.20–1.30**; above 1.32 deep-content retrieval degrades measurably. `0` disables the arm. |
+| `OBSIDIAN_CHUNK_CHARS` | `1000` | Chunk target size. |
+| `OBSIDIAN_CHUNK_OVERLAP` | `200` | Overlap between chunks. |
+| `OBSIDIAN_CHUNK_PACKING` | `false` | Merge adjacent small sections up to the target. Halves the index; **measurably hurt retrieval** here. |
+| `OBSIDIAN_LEXICAL_WEIGHT` | `0` | Experimental hybrid ranking. Off by default — see [below](#why-hybrid-ranking-is-off-by-default). |
+| `OBSIDIAN_HYBRID_ALPHA` | `0.25` | BM25 weight in the legacy `lexical_prefetch` re-rank path. |
 
-## Architecture
+### Embeddings
 
-```
-AI Client(s)
- │
- ├─ stdio (1:1 process)       ←  default, single-client
- │     OR
- ├─ HTTP POST /mcp (N:1)      ←  shared server, multi-client
- │
- ▼
-obsidian-mcp
- ├─ tools/          MCP handlers — translate protocol into vault ops
- ├─ vault/
- │  ├─ index        In-memory metadata (tags, links, headings)
- │  ├─ tantivy      BM25 full-text search
- │  ├─ embeddings   Model + strict cache contracts (optional)
- │  ├─ embedding_runtime  Background reconciliation + readiness
- │  └─ watcher      Filesystem events → index sync
- ├─ models.rs       Shared types
- └─ error.rs        VaultError → MCP ErrorData
- │ fs
- ▼
-Vault directory (.md files + .obsidian/)
-```
+| variable | default | notes |
+|---|---|---|
+| `OBSIDIAN_EMBEDDINGS` | `false` | Master switch for semantic search. |
+| `OBSIDIAN_EMBEDDING_PROVIDER` | inferred | `local` (fastembed) or `api`. |
+| `OBSIDIAN_EMBEDDING_API_BASE` | OpenAI | Any OpenAI-compatible `/v1` endpoint. |
+| `OBSIDIAN_EMBEDDING_API_MODEL` | — | Model name at that endpoint. |
+| `OBSIDIAN_EMBEDDING_API_KEY` | — | Falls back to `OPENAI_API_KEY`. |
+| `OBSIDIAN_EMBEDDING_DIM` | probed | Set explicitly to skip a probe request. |
+| `OBSIDIAN_EMBEDDING_QUERY_PREFIX` | `"query: "` | **Set both empty for prefix-free models such as bge-m3.** |
+| `OBSIDIAN_EMBEDDING_DOC_PREFIX` | `"passage: "` | |
+| `OBSIDIAN_EMBED_BATCH` | `16` | Chunks per provider request; large batches overrun local inference servers. |
 
-The vault layer is a pure Rust library with no knowledge of MCP. The tools layer is a thin adapter. This separation means the vault code is independently testable and reusable.
+Asymmetric models (Arctic, E5, Nomic, Qwen) expect these prefixes; sending none
+silently costs accuracy. Here the query prefix alone was worth nDCG 0.675 → 0.706.
 
-In HTTP mode, each MCP session gets its own handler instance, but all sessions share a single `Vault` (thread-safe through shared state). One filesystem watcher, one BM25 index, and one managed embedding coordinator/store serve all connected agents.
+### Server
 
-## Development
+| variable | default |
+|---|---|
+| `OBSIDIAN_VAULT_PATH` | required |
+| `OBSIDIAN_TRANSPORT` | `stdio` |
+| `OBSIDIAN_HTTP_PORT` / `_HOST` | `37842` / `127.0.0.1` |
+| `OBSIDIAN_WATCH` | `true` |
+| `OBSIDIAN_TANTIVY` | `true` |
+| `OBSIDIAN_SEMANTIC_MODE` | `auto` — `auto` \| `local` \| `daemon` |
+| `OBSIDIAN_MCP_DATA` | `{vault}/.obsidian-mcp` |
+| `OBSIDIAN_EXCLUDE_PATHS` | none |
+| `OBSIDIAN_TOOLS` | `full` |
 
-```sh
-cargo build                          # default build
-cargo build --features embeddings    # with local semantic search (fastembed)
-cargo build --features embeddings-api  # with API semantic search (OpenAI-compatible)
+## Tools
 
-# stdio mode (default)
-OBSIDIAN_VAULT_PATH=~/vault cargo run
+19 tools. Reference: [docs/TOOLS.md](docs/TOOLS.md).
 
-# HTTP mode
-OBSIDIAN_VAULT_PATH=~/vault cargo run -- --http
+**Search** — `search_semantic` · `search_text` · `search_regex` · `search_metadata`
+**Graph** — `wikilinks` (backlinks / outgoing / broken / orphans)
+**Read** — `note_read` · `note_read_many` · `note_inspect` · `frontmatter`
+**Write** — `note_create` · `note_write` · `note_insert` · `note_patch` · `note_move` · `note_delete`
+**Navigate** — `vault_list` · `vault_info` · `periodic` · `open_in_obsidian`
 
-cargo fmt --check && cargo clippy && cargo test
+## Graph capabilities
 
-npx @modelcontextprotocol/inspector cargo run   # interactive testing (stdio)
-```
+The link graph is a first-class layer, independent of retrieval. `wikilinks`
+answers four questions: **backlinks**, **outgoing**, **broken**, and **orphans**
+(distinguishing notes with no links at all from notes whose only links are
+broken). Links keep full fidelity — heading fragments (`[[note#heading]]`), block
+references (`[[note#^blockid]]`), aliases (`[[note|alias]]`), and line numbers.
+Backlink maps update incrementally on create, modify, rename and delete.
+
+A frontmatter fix here also **repaired the graph**: notes whose frontmatter parsed
+to a non-mapping were previously dropped from the index entirely, so links
+pointing at them were falsely reported broken and their own outgoing links never
+existed. On the development vault that restored 42 edges.
+
+## Why hybrid ranking is off by default
+
+Adding BM25 to semantic ranking is the obvious next step. It was tested across 28
+fusion configurations — weighted RRF, z-score sum, unit-normalised sum, and a
+bounded lexical bonus — with union candidate generation and per-arm weighting.
+
+**None beat semantic-only.** The decisive measurement was not the sweep but one
+diagnostic: *how many queries does BM25 rank correctly that semantics misses?*
+**Zero of 76** — while it could have spoiled 19. Its contribution was a strict
+subset.
+
+The mechanism explains it: the summary vector already embeds title and all
+headings, precisely the fields BM25 boosts hardest. The lexical signal was
+already inside the semantic space. Semantic beat BM25 even on the exact-keyword
+stratum, **1.000 vs 0.891**.
+
+This is the most corpus-dependent finding in the project. A vault heavy in rare
+proper nouns, code identifiers or exact-string lookups would plausibly show the
+opposite, so the knob exists: set `OBSIDIAN_LEXICAL_WEIGHT` above 0. When enabled
+it uses union candidate generation (never a BM25 gate) and calibrates each arm by
+its own maximum. Values near 0.10 were least harmful here; above ~0.25 quality
+degrades sharply.
+
+If you want literal matching, prefer asking for it directly with `search_text` —
+clearer than burying it in a blend.
+
+## Why the daemon is retained
+
+The `obsidian-semanticd` daemon and its client are kept, not removed.
+
+It is a **transport and process-lifecycle wrapper around the same retrieval
+engine**, not a parallel implementation — it calls the same
+`semantic_scores_for_paths` and `score_for`, so it inherits every improvement in
+this fork automatically. Its purpose is one shared model and one model cache
+across several clients (this server plus Obsidian plugin clients).
+
+That value is real but conditional: with a **local** (fastembed) provider it
+avoids loading the model once per client; with an **API** provider it is largely
+redundant, because the inference server is already the shared model host.
+Removing it would break the local multi-client case to gain nothing for the API
+case, so it stays — inert unless `OBSIDIAN_SEMANTIC_MODE` selects it.
+
+## Benchmark results
+
+Same vault, queries, gold labels and embedding model throughout. nDCG@10.
+
+| stratum | upstream | chunks only | **this fork** |
+|---|---|---|---|
+| overall | 0.834 | 0.900 | **0.939** |
+| deep content (answer past word 400) | 0.552 | 0.941 | **0.941** |
+| casual / typo | **0.930** | 0.875 | **0.975** |
+| paraphrase | 0.714 | 0.765 | **0.794** |
+| low lexical overlap | 0.818 | 0.817 | **0.857** |
+| exact keyword | 0.793 | 0.960 | **0.985** |
+
+Overall R@1 0.908, R@5 0.961, MRR 0.932.
+
+Note the middle column: **chunking alone lost to upstream on typo-heavy queries.**
+Reporting only the aggregate would have hidden that, and the fix would never have
+been found. Methodology and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+## Significant fixes over upstream
+
+| fix | impact |
+|---|---|
+| Chunk-level retrieval replacing the 400-word truncation | deep-content nDCG 0.552 → 0.941 |
+| Cache retention keyed on the wrong identifier | the entire cache was wiped on **every startup**, silently re-embedding the vault |
+| Per-note scoring missing chunk keys | returned `0.0` for every note, silently reducing hybrid search to lexical-only |
+| Content hash computed post-truncation | edits past word 400 never invalidated the cache, so the note was never re-embedded |
+| Non-mapping frontmatter dropped the note entirely | 10 of 416 notes lost from **both indexes and the link graph**; 42 edges restored |
+| Unbatched embedding requests | an entire corpus in one request overruns local inference servers |
+| No query/document prefixes | asymmetric models silently underperformed |
+| Semantic score exceeding `[0,1]` after weighting | unbalanced both hybrid blends; `alpha` stopped meaning what it says |
+| Cache-load errors swallowed by `.ok()` | a rejected cache silently re-embedded everything |
+| Self-updater reinstalling the upstream package | removed — 3,257 lines |
+
+Each has a regression test. Detail: [docs/FIXES.md](docs/FIXES.md).
+
+## Known limitations
+
+- **Single-corpus evidence.** One vault, 416 notes, 76 queries, one embedding
+  model. Re-measure on your own corpus before trusting any default here.
+- **Corpus-dependent defaults.** `OBSIDIAN_CHUNK_PACKING=false` and
+  `OBSIDIAN_LEXICAL_WEIGHT=0` suit a vault of short, precisely-titled sections. A
+  vault of long prose, or one heavy in identifiers, may want the opposite.
+- **Upstream still wins somewhere.** In a chunks-only configuration upstream's
+  whole-note representation beat this fork on typo-heavy queries. The summary arm
+  exists because of that, and the row stays in the table.
+- **`w_sum > 1.0` is a correction, not a tuned constant.** `max` over ~20 chunks
+  is systematically higher than a single summary score, so the arms are not on
+  equal footing. Normalising for chunk count would be more principled.
+- **The summary arm costs storage** — roughly +5% vectors and +21% indexing time.
+- **`wikilinks` output is not deterministically ordered** (hash-map iteration),
+  which matters for snapshot testing.
+- **One test is ignored on Windows** — a pre-existing upstream failure where
+  Windows denies an atomic file replace while a reader holds the file open. It
+  runs on Linux and macOS.
+- **Section packing is implemented but unproven elsewhere.** It halved the index
+  here at a small measured quality cost; no other corpus has been tested.
+- **The daemon path is lightly exercised** in this fork's testing; `local` and
+  `auto` modes are the well-trodden ones.
+
+## Attribution
+
+- **[lstpsche/obsidian-mcp](https://github.com/lstpsche/obsidian-mcp)** — the base
+  of this fork. The vault index, Tantivy lexical search, link graph, tool surface,
+  embedding cache with its integrity checks, and the semantic daemon are all its
+  work. MIT licensed. Its original README is kept at
+  [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md).
+- **[KORThomasJeong/obsidian-mcp-search](https://github.com/KORThomasJeong/obsidian-mcp-search)**
+  — not vendored, but its design directly informed this fork: heading-aware
+  chunking with breadcrumbs, returning the matched passage with its heading path,
+  and separating embedded text from returned text. MIT licensed.
+
+Ideas from the second project were reimplemented, not copied; no code was taken
+from it.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — retrieval, graph, daemon
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — methodology and full results
+- [docs/FIXES.md](docs/FIXES.md) — every significant fix and its regression test
+- [docs/TOOLS.md](docs/TOOLS.md) — tool reference
+- [docs/PROJECT_LOG.md](docs/PROJECT_LOG.md) — how this was built, including what went wrong
+- [docs/METHODOLOGY.md](docs/METHODOLOGY.md) — transferable evaluation lessons
 
 ## License
 
-[MIT](LICENSE)
+MIT, as upstream.
