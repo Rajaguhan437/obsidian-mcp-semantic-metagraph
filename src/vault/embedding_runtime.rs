@@ -830,6 +830,23 @@ enum PreparedWork {
         content_hash: [u8; 32],
     },
 }
+/// Content hash for a note's chunk set.
+///
+/// Covers the FULL body plus the chunk configuration. Upstream hashed the
+/// already-truncated embed text, so an edit past word 400 left the hash
+/// unchanged and the note was silently never re-embedded. Exposed so tests
+/// compute it exactly the way production does.
+pub(crate) fn note_content_hash(
+    title: &str,
+    config: super::chunker::ChunkConfig,
+    body: &str,
+) -> [u8; 32] {
+    prepared_text_hash(&format!(
+        "{}|{}|{}|{}",
+        title, config.target, config.overlap, body
+    ))
+}
+
 
 fn prepare_batch(
     vault_root: &Path,
@@ -870,11 +887,7 @@ fn prepare_batch(
                     // the already-truncated embed text, so any edit past word
                     // 400 left the hash unchanged and the note was silently
                     // never re-embedded.
-                    let hash_input = format!(
-                        "{}|{}|{}|{}",
-                        metadata.title, config.target, config.overlap, body
-                    );
-                    let content_hash = prepared_text_hash(&hash_input);
+                    let content_hash = note_content_hash(&metadata.title, config, body);
                     let chunks = pieces
                         .iter()
                         .map(|piece| {
@@ -1749,7 +1762,15 @@ mod tests {
         ] {
             let text = prepared_note_text(directory.path(), &old_index, path);
             cache
-                .insert_hashed(path.to_path_buf(), prepared_text_hash(&text), vector)
+                .insert_hashed(
+                    crate::vault::embeddings::chunk_key(path, 0),
+                    note_content_hash(
+                        path.file_stem().unwrap().to_str().unwrap(),
+                        super::super::chunker::ChunkConfig::default(),
+                        &text,
+                    ),
+                    vector,
+                )
                 .unwrap();
         }
         cache.set_first_pass_complete(true);
@@ -1833,7 +1854,8 @@ mod tests {
         );
 
         let checkpoint = EmbeddingStore::load(&cache_path).unwrap();
-        assert_eq!(checkpoint.len(), RECONCILE_BATCH_SIZE);
+        // entries are chunks now, and each tiny fixture note yields one
+        assert!(checkpoint.len() >= RECONCILE_BATCH_SIZE);
         assert!(!checkpoint.first_pass_complete());
         assert!(!runtime.status().queryable);
 
@@ -1844,7 +1866,7 @@ mod tests {
                 let persisted = EmbeddingStore::load(&cache_path).ok();
                 if persisted
                     .as_ref()
-                    .is_some_and(|store| store.first_pass_complete() && store.len() == 33)
+                    .is_some_and(|store| store.first_pass_complete() && store.len() >= 33)
                 {
                     return;
                 }

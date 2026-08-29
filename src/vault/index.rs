@@ -735,6 +735,67 @@ mod tests {
         assert!(index.get_note(Path::new(composed)).is_none());
     }
 
+        /// REGRESSION: a note whose frontmatter block parses to something other
+    /// than a YAML mapping used to abort parsing, so the note vanished from the
+    /// index entirely - and therefore from the LINK GRAPH. It was absent from
+    /// the link resolver, so inbound wikilinks to it were reported broken, and
+    /// its own outgoing links never existed. On a real 416-note vault this
+    /// silently destroyed 42 edges across 10 notes.
+    #[tokio::test]
+    async fn non_mapping_frontmatter_keeps_note_in_the_graph() {
+        let vault = tempfile::tempdir().unwrap();
+        let root = vault.path();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+
+        // "## title:" is a YAML COMMENT, so this frontmatter parses to null.
+        std::fs::write(
+            root.join("notes/quirky.md"),
+            "---\n\n## title: \"Quirky\"\n---\n\nBody linking out to [[target]].\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("notes/target.md"), "# Target\n\nplain note\n").unwrap();
+        std::fs::write(
+            root.join("notes/inbound.md"),
+            "# Inbound\n\npoints at [[quirky]]\n",
+        )
+        .unwrap();
+
+        let index = VaultIndex::build(root, empty_exclude()).await.unwrap();
+
+        // the note itself survives
+        assert!(
+            index.get_note(Path::new("notes/quirky.md")).is_some(),
+            "note with non-mapping frontmatter must still be indexed"
+        );
+
+        // its OUTGOING links are part of the graph
+        let outgoing = index.outgoing_links(Path::new("notes/quirky.md"));
+        assert!(
+            outgoing.iter().any(|l| l.target == "target"),
+            "outgoing wikilinks from the note must be in the graph"
+        );
+
+        // it can RECEIVE links: inbound.md -> quirky.md resolves, not broken
+        let backlinks = index.backlinks_to(Path::new("notes/quirky.md"));
+        assert!(
+            backlinks.iter().any(|n| n.path == PathBuf::from("notes/inbound.md")),
+            "links pointing AT the note must resolve into backlinks"
+        );
+        let broken: Vec<_> = index
+            .broken_links()
+            .into_iter()
+            .filter(|(_, l)| l.target == "quirky")
+            .collect();
+        assert!(
+            broken.is_empty(),
+            "link to a note with odd frontmatter must not be reported broken: {broken:?}"
+        );
+
+        // frontmatter degrades to an empty mapping rather than erroring
+        let note = index.get_note(Path::new("notes/quirky.md")).unwrap();
+        assert!(note.frontmatter.is_some(), "frontmatter should degrade, not vanish");
+    }
+
     #[tokio::test]
     async fn build_computes_correct_backlinks() {
         let vault = setup_vault();

@@ -707,7 +707,7 @@ fn daemon_log_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
 fn endpoint_from_override(raw: &str) -> IpcEndpoint {
     #[cfg(unix)]
     {
-        IpcEndpoint::UnixSocket(PathBuf::from(raw))
+        IpcEndpoint::UnixSocket(std::path::PathBuf::from(raw))
     }
     #[cfg(windows)]
     {
@@ -717,6 +717,7 @@ fn endpoint_from_override(raw: &str) -> IpcEndpoint {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use super::*;
 
     fn runtime_config(mode: SemanticMode) -> SemanticRuntimeConfig {

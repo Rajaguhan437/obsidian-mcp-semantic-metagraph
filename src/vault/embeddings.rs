@@ -247,6 +247,28 @@ impl EmbeddingStore {
     }
 
     /// Remove a note's embedding.
+    /// Best (maximum) cosine similarity across every chunk of `note`.
+    ///
+    /// The hybrid re-ranker scores one BM25 candidate at a time BY NOTE PATH.
+    /// With a chunk-level store a bare `get(note)` always misses, which
+    /// silently zeroes the semantic half of `alpha*BM25 + (1-alpha)*semantic`
+    /// and degrades hybrid search to pure BM25. Walk the note's chunks instead.
+    /// Chunk keys are contiguous from 0, so this stops at the first gap.
+    pub(crate) fn best_score_for_note(&self, note: &Path, query_vec: &[f32]) -> Option<f32> {
+        // Legacy whole-note key (v1 caches) still answers directly.
+        if let Some(entry) = self.embeddings.get(note) {
+            return Some(cosine_similarity(query_vec, &entry.vector));
+        }
+        let mut best: Option<f32> = None;
+        let mut index = 0usize;
+        while let Some(entry) = self.embeddings.get(&chunk_key(note, index)) {
+            let score = cosine_similarity(query_vec, &entry.vector);
+            best = Some(best.map_or(score, |current: f32| current.max(score)));
+            index += 1;
+        }
+        best
+    }
+
     /// True if `note` has at least one chunk in the store.
     ///
     /// O(1): chunks are always written from index 0 upward and committed as a
@@ -1483,6 +1505,101 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let results = store.query(&query, 100);
         assert_eq!(results.len(), 3);
+    }
+
+        // ── chunk-level store regressions ───────────────────────────────
+
+    /// REGRESSION: the hybrid re-ranker scores one BM25 candidate at a time by
+    /// NOTE path. With a chunk-level store a bare `get(note)` always misses and
+    /// returned 0.0, which silently zeroed the semantic half of
+    /// `alpha*BM25 + (1-alpha)*semantic` and degraded hybrid search to pure
+    /// BM25 - the benchmark reproduced pure-BM25 numbers to three decimals.
+    #[test]
+    fn best_score_for_note_finds_chunks_not_just_whole_note_keys() {
+        let mut store = EmbeddingStore::new(3);
+        let note = PathBuf::from("deep.md");
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&note, 1), [0u8; 32], vec![0.0, 1.0, 0.0])
+            .unwrap();
+
+        // a bare note-path lookup finds nothing - this is what regressed
+        assert!(store.get(&note).is_none());
+
+        // but the note is still scoreable, and takes its BEST chunk
+        let score = store
+            .best_score_for_note(&note, &[0.0, 1.0, 0.0])
+            .expect("note must be scoreable from its chunks");
+        assert!(
+            (score - 1.0).abs() < 1e-5,
+            "expected best chunk to win, got {score}"
+        );
+    }
+
+    /// REGRESSION: status counted indexed notes with `store.get(path)`, which
+    /// never matches a chunk key, so a fully indexed vault reported 0 notes.
+    #[test]
+    fn has_note_counts_notes_not_chunks() {
+        let mut store = EmbeddingStore::new(2);
+        let a = PathBuf::from("a.md");
+        let b = PathBuf::from("b.md");
+        for i in 0..3 {
+            store
+                .insert_hashed(chunk_key(&a, i), [0u8; 32], vec![1.0, 0.0])
+                .unwrap();
+        }
+        assert!(store.has_note(&a));
+        assert!(!store.has_note(&b));
+        assert_eq!(store.len(), 3, "three chunks stored");
+    }
+
+    /// A note that shrinks must not leave orphaned vectors behind.
+    #[test]
+    fn remove_note_drops_every_chunk() {
+        let mut store = EmbeddingStore::new(2);
+        let note = PathBuf::from("shrink.md");
+        let other = PathBuf::from("keep.md");
+        for i in 0..4 {
+            store
+                .insert_hashed(chunk_key(&note, i), [0u8; 32], vec![1.0, 0.0])
+                .unwrap();
+        }
+        store
+            .insert_hashed(chunk_key(&other, 0), [0u8; 32], vec![0.0, 1.0])
+            .unwrap();
+
+        assert!(store.remove_note(&note));
+        assert!(!store.has_note(&note));
+        assert!(store.has_note(&other), "sibling notes must survive");
+        assert_eq!(store.len(), 1);
+    }
+
+    /// Chunk keys must round-trip back to their note path.
+    #[test]
+    fn chunk_keys_round_trip_and_plain_paths_pass_through() {
+        let note = PathBuf::from("dir/some note.md");
+        assert_eq!(note_path_of(&chunk_key(&note, 7)), note.as_path());
+        assert_eq!(note_path_of(&note), note.as_path());
+    }
+
+    /// Query results collapse chunk keys back to NOTE paths, best chunk wins.
+    #[test]
+    fn query_collapses_chunks_to_notes() {
+        let mut store = EmbeddingStore::new(2);
+        let a = PathBuf::from("a.md");
+        store
+            .insert_hashed(chunk_key(&a, 0), [0u8; 32], vec![0.2, 0.98])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&a, 1), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+
+        let hits = store.query(&[1.0, 0.0], 10);
+        assert_eq!(hits.len(), 1, "one note, not one row per chunk");
+        assert_eq!(hits[0].0, a, "result must be a note path, not a chunk key");
+        assert!((hits[0].1 - 1.0).abs() < 1e-5, "best chunk should win");
     }
 
     #[test]
