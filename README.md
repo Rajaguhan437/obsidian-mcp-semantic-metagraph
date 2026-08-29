@@ -1,5 +1,8 @@
 # obsidian-mcp-semantic-metagraph
 
+[![CI](https://github.com/Rajaguhan437/obsidian-mcp-semantic-metagraph/actions/workflows/ci.yml/badge.svg)](https://github.com/Rajaguhan437/obsidian-mcp-semantic-metagraph/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > A fork of **[lstpsche/obsidian-mcp](https://github.com/lstpsche/obsidian-mcp)**, incorporating retrieval ideas from
 > **[KORThomasJeong/obsidian-mcp-search](https://github.com/KORThomasJeong/obsidian-mcp-search)**. See [Attribution](#attribution).
 
