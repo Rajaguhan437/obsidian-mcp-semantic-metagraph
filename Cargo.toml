@@ -1,11 +1,11 @@
 [package]
-name = "obsidian-mcp"
-version = "2.5.0"
+name = "obsidian-mcp-semantic-metagraph"
+version = "0.1.0"
 edition = "2024"
-description = "MCP server for Obsidian vaults — direct filesystem access for AI agents"
+description = "Obsidian MCP server with passage-level semantic retrieval, metadata/provenance and graph tools. Fork of lstpsche/obsidian-mcp."
 license = "MIT"
-repository = "https://github.com/lstpsche/obsidian-mcp"
-keywords = ["mcp", "obsidian", "vault", "ai"]
+repository = "https://github.com/Rajaguhan437/obsidian-mcp-semantic-metagraph"
+keywords = ["mcp", "obsidian", "vault", "rag", "semantic-search"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -47,6 +47,13 @@ embeddings-api = ["dep:bincode", "dep:tempfile", "reqwest/blocking", "reqwest/js
 
 [dev-dependencies]
 tempfile = "3"
+
+# The package is renamed, but the library crate name is pinned: `src/`, the
+# binaries and 48 references across `tests/` all `use obsidian_mcp::...`.
+# Without this, the lib would become `obsidian_mcp_semantic_metagraph`.
+[lib]
+name = "obsidian_mcp"
+path = "src/lib.rs"
 
 [[bin]]
 name = "obsidian-mcp"

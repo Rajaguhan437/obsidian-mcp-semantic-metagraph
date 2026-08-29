@@ -1,4 +1,7 @@
-# obsidian-mcp (chunk-level retrieval fork)
+# obsidian-mcp-semantic-metagraph
+
+> A fork of **[lstpsche/obsidian-mcp](https://github.com/lstpsche/obsidian-mcp)**, incorporating retrieval ideas from
+> **[KORThomasJeong/obsidian-mcp-search](https://github.com/KORThomasJeong/obsidian-mcp-search)**. See [Attribution](#attribution).
 
 An MCP server giving AI agents semantic search, lexical search, and graph
 navigation over an Obsidian vault — reading the vault directly from disk, with no
@@ -71,7 +74,7 @@ Requires Rust. Embedding backends are **not** enabled by default:
 
 ```bash
 # API-backed embeddings (Ollama, OpenAI, LM Studio, vLLM — any OpenAI-compatible endpoint)
-cargo install --path . --features embeddings-api
+cargo install --path . --features embeddings-api    # installs the `obsidian-mcp` binary
 
 # or local in-process embeddings (fastembed)
 cargo install --path . --features embeddings
@@ -308,6 +311,19 @@ from it.
 - [docs/PROJECT_LOG.md](docs/PROJECT_LOG.md) — how this was built, including what went wrong
 - [docs/METHODOLOGY.md](docs/METHODOLOGY.md) — transferable evaluation lessons
 
+## Naming
+
+The package is `obsidian-mcp-semantic-metagraph`; the binary it installs is
+`obsidian-mcp`, unchanged from upstream so existing MCP client configuration
+keeps working. The MCP server announces itself as
+`obsidian-mcp-semantic-metagraph` so a client can tell which implementation
+answered.
+
+**If you have upstream installed, note that `cargo install` writes the same
+binary name into `~/.cargo/bin` and the later install wins.** Install only one,
+or rename the binary after installing.
+
 ## License
 
-MIT, as upstream.
+MIT, as upstream. Upstream's copyright is retained in [LICENSE](LICENSE); the
+fork's copyright is added beneath it, as MIT requires.
