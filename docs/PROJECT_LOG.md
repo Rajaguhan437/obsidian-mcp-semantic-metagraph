@@ -12,13 +12,13 @@ work, not from memory. Keep it updated as phases land.
 
 | What | Path |
 |---|---|
-| The fork | `D:\obsidian-mcp-fork` (branch `chunk-level-retrieval`, remote `upstream` -> lstpsche/obsidian-mcp) |
+| The fork | `<repo>` (branch `chunk-level-retrieval`, remote `upstream` -> lstpsche/obsidian-mcp) |
 | Rust toolchain | `D:\rust` — set `RUSTUP_HOME`, `CARGO_HOME`; **C: is nearly full, keep Rust off it** |
 | Build target dir | `CARGO_TARGET_DIR=D:\rust\target2` |
-| Benchmark harness | `C:\Users\Admin\rag-bench` (scripts) |
-| Benchmark data | `D:\rag-bench` (isolated vault copy, queries, graph baselines, binaries in `bin/`) |
-| Upstream clones | `C:\Users\Admin\rag-bench\upstream` (Rust), `C:\Users\Admin\rag-bench\omcs` (Python) |
-| Production RAG | `obsidian-mcp-search` on `127.0.0.1:8848`, launcher `C:\Users\Admin\.config\obsidian-mcp-search\serve.cmd` |
+| Benchmark harness | `<bench>` (scripts) |
+| Benchmark data | `<bench-data>` (isolated vault copy, queries, graph baselines, binaries in `bin/`) |
+| Upstream clones | `<bench>/upstream` (Rust), `<bench>/omcs` (Python) |
+| Production RAG | `obsidian-mcp-search` on `127.0.0.1:8848`, launcher `<config>/obsidian-mcp-search/serve.cmd` |
 
 **Always build with `--features embeddings-api`.** The default feature set
 compiles with no embedding support at all.
@@ -32,8 +32,8 @@ it mid-project and destroyed a corpus of embeddings.
 
 The user runs a local stack: Qwen3.6-35B via LM Studio (`:1234`) for generation,
 Ollama (`:11434`) for embeddings, on an **RTX 3060 Laptop with 6 GB VRAM**. The
-Obsidian vault is at `D:\Personal\Obsidian Vault` — 512 markdown files, of which
-`Spartan Vault` (416 notes, ~2.9 MB) holds the real content.
+Obsidian vault is at `<vault>` — 512 markdown files, of which
+`the development vault` (416 notes, ~2.9 MB) holds the real content.
 
 Original question: **which of three embedding models to use** — bge-m3,
 snowflake-arctic-embed2, nomic-embed-text-v2-moe. (The user said "bge-large";
@@ -81,7 +81,7 @@ The user's original RAG was in this plugin. It was structurally broken:
 - **`gJ = 50`** — a hard cap of 50 files per sync (`C.slice(0, 50)`); the rest are
   silently deferred. 416 notes need ~9 sync clicks.
 - **Empty `targetFolders` means "whole vault", not "no filter"** — two of the
-  three indexes were never scoped to Spartan Vault and burned slots on
+  three indexes were never scoped to the development vault and burned slots on
   `Templates/` and agent scaffolding.
 - **The `sentence` chunker splits only on `/[。.]\s/`.** A note with no `". "`
   becomes ONE chunk — worst case 380,276 characters. 92 notes affected.
@@ -339,7 +339,7 @@ truth, not a regression.
 
 ## 12. Benchmark methodology
 
-- **Corpus:** isolated byte-copy of Spartan Vault at `D:\rag-bench\vault`
+- **Corpus:** isolated byte-copy of the development vault at `<bench-data>/vault`
   (416 notes, 2.9 MB). Production never touched.
 - **Queries:** 76, agent-authored from real notes then adversarially verified
   against the files. Stratified six ways: overall, deep (answer past word 400),
