@@ -19,6 +19,24 @@ Meaning-based retrieval over chunk and summary vectors.
 Requires `OBSIDIAN_EMBEDDINGS=true` and a built index. While the index is warming
 it returns an explicit "not ready" error rather than silently degrading.
 
+**Result fields** (beyond `path`, `title`, `score`, `tags`, `snippet`, `content`):
+
+| field | notes |
+|---|---|
+| `match_type` | `chunk` \| `summary` \| `note` — which representation produced `score` |
+| `best_chunk` | the note's most relevant passage: `index`, `heading_path` (array, outermost first), `passage`, `score` (raw cosine) |
+| `summary_score` | the summary arm's weighted score, as a number |
+
+`best_chunk` is present on every hit that has chunks, **including when
+`match_type` is `summary`**. In that case the passage is the note's most relevant
+one but did *not* cause the ranking — branch on `match_type`, not on the
+presence of `best_chunk`.
+
+`score` is a ranking score, not a cosine: a weighted summary win can exceed 1.0.
+
+Both fields are absent in `daemon` mode (note-level IPC protocol) and when
+`lexical_prefetch` is true (a blended rank is not attributable to one arm).
+
 ### `search_text`
 Tantivy BM25 across title, headings, tags, frontmatter and full body, with field
 boosts. Use this for exact strings, identifiers and terminology.

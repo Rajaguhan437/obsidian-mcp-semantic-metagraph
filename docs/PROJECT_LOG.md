@@ -499,3 +499,76 @@ wrong.
 Windows and failing identically on upstream `fea2e1f` — **passes here**. That
 promotes the Windows failure from an asserted platform limitation to a
 demonstrated one.
+
+
+---
+
+## Phase 6 - retrieval provenance
+
+`search_semantic` returned note-level hits only: an agent learned *which note*
+matched but never *where*. The chunk index was known at scoring time and thrown
+away one layer below the tool.
+
+### What ships
+
+`match_type` (`chunk` | `summary` | `note`) says which representation produced
+the score. `best_chunk` carries the note's most relevant passage - index,
+`heading_path` as segments, text, and its raw cosine. `summary_score` exposes the
+other arm as a number.
+
+**Attribution and evidence are deliberately separate.** The summary vector is a
+retrieval arm in its own right, so a note can rank because it matched as a whole.
+The first implementation returned nothing at all for a summary win, on the
+grounds that claiming a passage would be inventing evidence. That was right about
+the claim and wrong about the remedy: the note still *has* a most-relevant
+passage, and withholding it forces an agent to re-read the whole note to find
+what the index already knows. `best_chunk` is now supplied on every hit that has
+chunks; `match_type` carries the attribution.
+
+The summary TEXT is not returned. A 400-word summary per hit would dominate the
+response for no retrieval benefit.
+
+The passage is re-derived by re-chunking at query time rather than stored:
+`chunk_note` is deterministic for a body and config, so index `i` addresses
+exactly what was embedded. No cache format change, no second copy of the corpus.
+
+`heading_path` is carried as segments through the chunker rather than split back
+out of `"A > B"`, because a heading may contain the separator. There is a
+regression test with a heading literally named `Costs > Benefits`.
+
+### The default weight changed, and not as a trade-off
+
+Provenance gave the summary weight a second axis. Ranking is **identical** across
+[1.18, 1.28] - overall .9442, deep .9412, casual .9754, R@1 .9211, MRR .9386 -
+but the share of top-8 hits attributable to a chunk falls monotonically with the
+weight: 31.4% at 1.18, 27.5% at 1.20, **18.8% at 1.25**, 12.2% at 1.30.
+
+So the shipped 1.25 was **strictly dominated** by 1.20: same ranking on every
+stratum and 46% more citable results. Default lowered to 1.20. This was not a
+judgement call between competing goods - 1.25 simply had nothing to recommend it
+once a second axis existed. It had been chosen as "mid-plateau" when the plateau
+looked one-dimensional.
+
+Measured offline from the cached sweep vectors, so no re-embedding was needed;
+the note ordering was verified against the summary matrix before trusting it.
+
+### Cost
+
+top_k=5, `include_content=false`: 1,764 -> 3,836 bytes (+117%, ~518 tokens),
+median 206 bytes of evidence per result. The largest single passage observed was
+1,086 bytes.
+
+### Verification
+
+758 pass, 0 fail, 0 ignored (677 unit / 1 bin / 8 daemon / 72 integration).
+Six new regression tests: chunk win returns passage and heading path; summary win
+still returns the best chunk; `match_type` distinguishes them; the two arms'
+scores stay distinct; ranking order is unchanged by adding the fields; `query()`
+and `best_score_for_note()` agree.
+
+End to end against a live server: every hit carried `best_chunk` including the
+four summary wins, `summary_score` stayed distinct from the chunk score, and no
+summary text appeared in any response.
+
+Unchanged by this phase: chunking, scoring, hybrid behaviour, the daemon
+architecture, every graph tool, and the benchmark methodology.

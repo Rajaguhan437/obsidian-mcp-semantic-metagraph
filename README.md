@@ -68,6 +68,66 @@ deep-content gain.
 
 Detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+
+## Retrieval provenance
+
+Every semantic hit says **why** it ranked, and hands back the passage responsible
+where there is one. An agent gets "this exact section matched" rather than "this
+note is relevant somewhere."
+
+```json
+{
+  "path": "Engineering/Ingest Worker Design.md",
+  "title": "Ingest Worker Design",
+  "score": 0.94,
+  "match_type": "chunk",
+  "best_chunk": {
+    "index": 12,
+    "heading_path": ["Ingest Worker Design", "Retry policy"],
+    "passage": "## Retry policy
+
+After testing we settled on five attempts...",
+    "score": 0.94
+  },
+  "summary_score": 0.71
+}
+```
+
+**`match_type` is the honest part.** The summary vector is a retrieval arm in its
+own right, so a note can rank because it matched *as a whole* rather than at one
+passage:
+
+| `match_type` | what it means |
+|---|---|
+| `chunk` | one passage caused the ranking; `best_chunk` is that passage |
+| `summary` | the whole-note vector caused it; `best_chunk` is still the note's most relevant passage, but it did **not** cause the rank |
+| `note` | a legacy whole-note entry from a pre-chunking cache |
+
+**Attribution and evidence are separate.** `best_chunk` is supplied on every hit
+that has chunks — including summary wins — because withholding it would force an
+agent to re-read a whole note to find what the index already knows. Reporting the
+passage is not a claim that it ranked; `match_type` carries that, and
+`summary_score` next to `best_chunk.score` shows how close the two arms were.
+
+`summary_score` is a number, not text. Returning a 400-word summary per hit would
+dominate the response for no retrieval benefit; use `note_read` when the whole
+note is wanted.
+
+**How often is a result attributable to a passage?** On the development corpus,
+**27.5% of top-8 hits** at the default weight — the rest ranked on their summary.
+That share is set by `OBSIDIAN_SUMMARY_WEIGHT`, and it is why the default is 1.20
+rather than 1.25 (identical ranking, 46% more attributable results). Lowering it
+further trades ranking quality for attribution: at `1.0`, 86% of hits are
+chunk-attributable but casual/typo retrieval drops from .975 to .888.
+
+**Cost.** Roughly +117% response bytes at `top_k=5` without content (1,764 →
+3,836 bytes, ~518 tokens), median 206 bytes of evidence per result.
+
+**Not available** in `daemon` mode, whose IPC protocol carries note-level hits
+only, or on the experimental hybrid path, where a blended rank is not
+attributable to a single representation. Both omit the fields rather than
+guessing.
+
 ## Install
 
 Requires Rust. Embedding backends are **not** enabled by default:
@@ -119,7 +179,7 @@ are near-instant.
 
 | variable | default | notes |
 |---|---|---|
-| `OBSIDIAN_SUMMARY_WEIGHT` | `1.25` | Weight of the summary arm. Tested plateau **1.20–1.30**; above 1.32 deep-content retrieval degrades measurably. `0` disables the arm. |
+| `OBSIDIAN_SUMMARY_WEIGHT` | `1.20` | Weight of the summary arm. Ranking is **identical across [1.18, 1.28]**; above 1.32 deep-content retrieval degrades measurably. The default sits at the low end of that plateau because a lower weight lets a *chunk* win more often, and only a chunk win can attribute a result to a passage — see [Retrieval provenance](#retrieval-provenance). `0` disables the arm. |
 | `OBSIDIAN_CHUNK_CHARS` | `1000` | Chunk target size. |
 | `OBSIDIAN_CHUNK_OVERLAP` | `200` | Overlap between chunks. |
 | `OBSIDIAN_CHUNK_PACKING` | `false` | Merge adjacent small sections up to the target. Halves the index; **measurably hurt retrieval** here. |

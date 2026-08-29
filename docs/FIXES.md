@@ -85,8 +85,9 @@ and is shared by production and test fixtures so they cannot drift apart.
 
 ## 6. Semantic score escaped [0,1] and unbalanced both hybrid blends
 
-**Introduced by the summary arm.** With `w_sum = 1.25`, `score_for` can reach
-1.25, but both hybrid paths blend it against a `[0,1]` min-max BM25 score. The
+**Introduced by the summary arm.** With any `w_sum` above 1.0 (1.25 at the time;
+1.20 today), `score_for` can exceed 1.0, but both hybrid paths blend it against a
+`[0,1]` min-max BM25 score. The
 `alpha` a caller set stopped meaning what it says, and a note's contribution
 shifted depending on whether a chunk or its summary won — a discontinuity.
 

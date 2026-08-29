@@ -43,8 +43,8 @@ cargo test --features embeddings
 sockets, so they are invisible on Windows and skipped without the feature. Part
 of `tests/integration_tests.rs` is gated the same way.
 
-Expected on Linux with `--features embeddings`: **751 pass, 0 fail, 0 ignored**
-(670 unit, 1 binary, 8 daemon integration, 72 integration).
+Expected on Linux with `--features embeddings`: **758 pass, 0 fail, 0 ignored**
+(677 unit, 1 binary, 8 daemon integration, 72 integration).
 
 Counts differ by platform in both directions — `src/` has Windows-gated blocks
 worth 6 unit tests, and one test

@@ -79,8 +79,24 @@ mode, not found by sweeping.
 **Why `w_sum > 1`.** `max` over ~20 chunks is systematically higher than a single
 summary score, so the two arms are not on equal footing; the weight compensates.
 This is a correction, not a tuned constant — normalising for chunk count would be
-more principled. Measured plateau is [1.20, 1.30]; at 1.32 deep-content retrieval
-degrades sharply.
+more principled. Every ranking metric is identical across [1.18, 1.28]; at 1.32
+deep-content retrieval degrades sharply.
+
+The default is **1.20**, the low end of that plateau, chosen on a second axis:
+the weight decides how often a *chunk* rather than the summary wins a note, and
+only a chunk win can attribute a result to a specific passage. 27.5% of top-8
+hits are chunk-attributable at 1.20 versus 18.8% at 1.25 — same ranking, more
+citable results.
+
+### Provenance
+
+`collapse_to_notes` keeps both arms per note rather than only the winner, so a
+result can report the note's best chunk (index, heading trail, raw cosine)
+*independently* of which arm won. `match_type` carries the attribution; the
+passage is evidence, not a claim about cause. The passage text is re-derived by
+re-chunking the note at query time — `chunk_note` is deterministic for a given
+body and config, so index `i` addresses exactly what was embedded, and no second
+copy of the corpus is stored.
 
 Note this makes `score_for` a **ranking score, not a cosine** — it can exceed 1.0.
 Anything blending it with another arm must call `blend_score_for()`, which

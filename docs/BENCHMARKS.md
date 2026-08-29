@@ -131,8 +131,26 @@ rank did not predict the winner on this corpus.**
 
 **Summary weight** — 36 configurations. Quality is flat across **[1.20, 1.30]**
 and collapses at **1.32** (deep content 0.941 → 0.919, paraphrase 0.794 → 0.772).
-The default sits mid-plateau at 1.25 rather than at the marginally higher-scoring
-edge, because a wide safe operating range is worth more than 0.005 for a default.
+The default sits at **1.20**, the low end of the plateau. Every ranking metric
+is identical across [1.18, 1.28] - overall nDCG .9442, deep .9412, casual .9754,
+R@1 .9211, MRR .9386 - so within that band the weight is free to be chosen on a
+second axis: how often a **chunk**, rather than the summary, wins a note. Only a
+chunk win can attribute a result to a specific passage, and that share falls
+monotonically as the weight rises:
+
+| `w_sum` | overall nDCG | deep | casual | top-8 hits attributable to a chunk |
+|---|---|---|---|---|
+| 1.15 | .9394 | .9412 | .9508 | 38.0% |
+| 1.18 | .9442 | .9412 | .9754 | 31.4% |
+| **1.20** | **.9442** | **.9412** | **.9754** | **27.5%** |
+| 1.25 | .9442 | .9412 | .9754 | 18.8% |
+| 1.30 | .9491 | .9412 | .9754 | 12.2% |
+
+1.30 does score marginally higher overall (.9491) but sits directly against the
+1.32 collapse and has the worst attribution rate. 1.25 - the previous default -
+is strictly dominated by 1.20: identical on every ranking metric, 46% fewer
+citable results. That was invisible until provenance gave the plateau a second
+axis to be measured on.
 
 **Chunk size** — 600/120, 1000/200, 1500/150, 2000/300 tested. 1000/200 holds
 deep content at 0.941 across *every* summary weight; 2000/300 only reaches it once
