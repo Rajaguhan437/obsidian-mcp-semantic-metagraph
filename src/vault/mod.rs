@@ -533,6 +533,9 @@ impl Vault {
             .collect())
     }
 
+    /// Rank-affecting behaviour lives in [`Self::search_semantic`]; this is the
+    /// same ranking with the evidence attached.
+
     /// As [`Self::search_semantic`], but reports which stored representation
     /// matched each note.
     ///
@@ -545,7 +548,7 @@ impl Vault {
         &self,
         query: &str,
         top_k: usize,
-    ) -> VaultResult<Vec<(PathBuf, f32, Option<embeddings::MatchedOn>)>> {
+    ) -> VaultResult<Vec<(PathBuf, f32, Option<embeddings::NoteMatch>)>> {
         let runtime = self.inner.embedding_runtime.as_ref().ok_or_else(|| {
             VaultError::Embedding("embeddings not enabled (OBSIDIAN_EMBEDDINGS=false)".into())
         })?;
@@ -562,7 +565,7 @@ impl Vault {
             return Ok(snapshot
                 .semantic_hits_for_paths(query, &current_paths, top_k)?
                 .into_iter()
-                .map(|(path, score, matched)| (path, score, Some(matched)))
+                .map(|(path, matched)| (path, matched.score, Some(matched)))
                 .collect());
         }
         Ok(self

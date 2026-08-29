@@ -183,7 +183,7 @@ impl EmbeddingQuerySnapshot {
         query: &str,
         allowed_paths: &HashSet<PathBuf>,
         top_k: usize,
-    ) -> VaultResult<Vec<(PathBuf, f32, super::embeddings::MatchedOn)>> {
+    ) -> VaultResult<Vec<(PathBuf, super::embeddings::NoteMatch)>> {
         let query_vector = self.embed_query(query)?;
         let store = self.store.read().unwrap_or_else(|error| error.into_inner());
         Ok(store.query_paths_detailed(&query_vector, allowed_paths, top_k))
