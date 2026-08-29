@@ -272,6 +272,36 @@ struct SemanticSearchResult {
     snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    /// Which representation caused this note to rank:
+    ///
+    /// - `"chunk"` — one specific passage matched. The evidence is localised,
+    ///   and `matching_passage` / `heading_path` say exactly where.
+    /// - `"summary"` — the whole-note vector matched (title + every heading +
+    ///   the first 400 words). The note is relevant *as a whole*; no single
+    ///   passage is responsible, so the passage fields are null rather than a
+    ///   guess. Because that arm is weighted, a summary win is also why `score`
+    ///   can exceed 1.0.
+    /// - `"note"` — a legacy whole-note entry from a pre-chunking cache.
+    ///
+    /// Absent entirely on the experimental hybrid path, where a blended rank is
+    /// not attributable to one representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_type: Option<&'static str>,
+    /// The exact passage that matched. Only ever present for
+    /// `match_type: "chunk"`, and omitted when `include_content` already
+    /// returns the whole note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matching_passage: Option<String>,
+    /// Heading trail of the matched passage, outermost first, e.g.
+    /// `["Ingest Worker Design", "Retry policy"]`. An empty array means the
+    /// passage sits above the note's first heading. Only present for
+    /// `match_type: "chunk"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading_path: Option<Vec<String>>,
+    /// 0-based index of the matched passage within the note. Only present for
+    /// `match_type: "chunk"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk_index: Option<usize>,
 }
 
 pub async fn search_semantic(
@@ -423,10 +453,75 @@ async fn search_semantic_daemon(
                 tags: hit.tags,
                 snippet: hit.snippet,
                 content: hit.content,
+                // The daemon IPC protocol carries note-level hits only, so
+                // passage provenance is unavailable in `daemon` mode. The
+                // fields are omitted rather than guessed.
+                match_type: None,
+                matching_passage: None,
+                heading_path: None,
+                chunk_index: None,
             })
         })
         .take(top_k)
         .collect())
+}
+
+/// Resolve a match back to its heading trail and passage text.
+///
+/// The passage is re-derived, not stored: `chunk_note` is deterministic for a
+/// given body and config, so index `i` addresses exactly the passage the
+/// indexer embedded. That keeps a second copy of the corpus out of the cache
+/// and off disk, at the cost of chunking one note per result.
+#[cfg(has_embeddings)]
+#[derive(Default)]
+struct Provenance {
+    match_type: Option<&'static str>,
+    matching_passage: Option<String>,
+    heading_path: Option<Vec<String>>,
+    chunk_index: Option<usize>,
+}
+
+#[cfg(has_embeddings)]
+fn resolve_provenance(
+    matched: Option<crate::vault::embeddings::MatchedOn>,
+    note_text: Option<&str>,
+    config: crate::vault::chunker::ChunkConfig,
+    include_content: bool,
+) -> Provenance {
+    use crate::vault::embeddings::MatchedOn;
+    match matched {
+        Some(MatchedOn::Chunk(index)) => {
+            let mut found = Provenance {
+                match_type: Some("chunk"),
+                chunk_index: Some(index),
+                ..Provenance::default()
+            };
+            if let Some(text) = note_text {
+                let body = crate::vault::frontmatter::get_body(text);
+                if let Some(chunk) = crate::vault::chunker::chunk_note(body, config).get(index) {
+                    found.heading_path = Some(chunk.heading_path.clone());
+                    // Redundant when the caller already receives the whole note.
+                    if !include_content {
+                        found.matching_passage = Some(chunk.text.clone());
+                    }
+                }
+            }
+            found
+        }
+        // A summary win means the note matched AS A WHOLE. Reporting a passage
+        // here would invent evidence: no single chunk is responsible, and the
+        // 400-word summary is a representation of the note, not a quote from
+        // it. Null is the truthful answer.
+        Some(MatchedOn::Summary) => Provenance {
+            match_type: Some("summary"),
+            ..Provenance::default()
+        },
+        Some(MatchedOn::WholeNote) => Provenance {
+            match_type: Some("note"),
+            ..Provenance::default()
+        },
+        None => Provenance::default(),
+    }
 }
 
 #[cfg(has_embeddings)]
@@ -439,37 +534,47 @@ fn search_semantic_local(
     alpha: f32,
 ) -> Result<Vec<SemanticSearchResult>, VaultError> {
     let candidate_limit = semantic_candidate_limit(top_k);
-    let hits = if lexical_prefetch {
-        vault.search_hybrid(
-            query,
-            candidate_limit,
-            DEFAULT_PREFETCH_COUNT.max(candidate_limit),
-            alpha,
-        )?
-    } else {
-        vault.search_semantic(query, candidate_limit)?
-    };
+    let hits: Vec<(std::path::PathBuf, f32, Option<crate::vault::embeddings::MatchedOn>)> =
+        if lexical_prefetch {
+            vault
+                .search_hybrid(
+                    query,
+                    candidate_limit,
+                    DEFAULT_PREFETCH_COUNT.max(candidate_limit),
+                    alpha,
+                )?
+                .into_iter()
+                .map(|(path, score)| (path, score, None))
+                .collect()
+        } else {
+            vault.search_semantic_detailed(query, candidate_limit)?
+        };
 
     let word_re = if !include_content {
         compile_query_word_regex(query)
     } else {
         None
     };
+    // Same body and same config the indexer chunked with, so `Chunk(i)` refers
+    // to the same passage. A note edited since it was indexed can drift until
+    // it is re-embedded; the heading is then stale rather than wrong-by-design.
+    let chunk_config = crate::vault::chunker::ChunkConfig::from_env();
 
     let mut results = Vec::with_capacity(hits.len());
-    for (path, score) in hits {
+    for (path, score, matched) in hits {
         let meta = match vault.get_note_metadata(&path) {
             Ok(meta) => meta,
             Err(_) => continue,
         };
         let title = meta.title.clone();
         let tags = meta.tags.clone();
+        let note_text = vault.read_note(&path).ok();
 
         let (content, snippet) = if include_content {
-            (vault.read_note(&path).ok(), None)
+            (note_text.clone(), None)
         } else {
-            let snip = vault.read_note(&path).ok().map(|text| {
-                let body = crate::vault::frontmatter::get_body(&text);
+            let snip = note_text.as_ref().map(|text| {
+                let body = crate::vault::frontmatter::get_body(text);
                 if let Some(ref re) = word_re
                     && let Some(found) = re.find(body)
                 {
@@ -481,10 +586,13 @@ fn search_semantic_local(
                     );
                     return ctx;
                 }
-                body_preview(&text, SNIPPET_FALLBACK_CHARS)
+                body_preview(text, SNIPPET_FALLBACK_CHARS)
             });
             (None, snip)
         };
+
+        let provenance =
+            resolve_provenance(matched, note_text.as_deref(), chunk_config, include_content);
 
         results.push(SemanticSearchResult {
             path,
@@ -493,6 +601,10 @@ fn search_semantic_local(
             tags,
             snippet,
             content,
+            match_type: provenance.match_type,
+            matching_passage: provenance.matching_passage,
+            heading_path: provenance.heading_path,
+            chunk_index: provenance.chunk_index,
         });
         if results.len() == top_k {
             break;
@@ -574,6 +686,100 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// A matched chunk index must resolve to that chunk's heading trail and
+    /// text. Without this the server can rank by passage but can only tell an
+    /// agent which note matched, not where in it - which is the difference
+    /// between "somewhere in this 4000-word note" and a citable answer.
+    #[cfg(has_embeddings)]
+    #[test]
+    fn provenance_resolves_a_chunk_to_its_heading_and_passage() {
+        use crate::vault::chunker::ChunkConfig;
+        use crate::vault::embeddings::MatchedOn;
+
+        let note = "---\ntitle: Design\n---\n\
+                    # Design\nintro paragraph\n\n\
+                    ## Retry policy\nwe settled on five attempts with backoff\n\n\
+                    ## Rollout\nship behind a flag\n";
+        let config = ChunkConfig::default();
+        let body = crate::vault::frontmatter::get_body(note);
+        let chunks = crate::vault::chunker::chunk_note(body, config);
+        let target = chunks
+            .iter()
+            .position(|c| c.text.contains("five attempts"))
+            .expect("the retry section must be its own chunk");
+
+        let found = resolve_provenance(
+            Some(MatchedOn::Chunk(target)),
+            Some(note),
+            config,
+            /* include_content */ false,
+        );
+        assert_eq!(found.match_type, Some("chunk"));
+        assert_eq!(found.chunk_index, Some(target));
+        assert_eq!(
+            found.heading_path.as_deref(),
+            Some(["Design".to_string(), "Retry policy".to_string()].as_slice()),
+            "the trail must be segments, not a joined string"
+        );
+        assert!(
+            found.matching_passage.unwrap().contains("five attempts"),
+            "the passage must be the text that matched"
+        );
+
+        // With the whole note already returned, the passage would be redundant.
+        let found = resolve_provenance(Some(MatchedOn::Chunk(target)), Some(note), config, true);
+        assert!(found.matching_passage.is_none());
+
+        // A summary win must NOT claim a passage. The note matched as a whole;
+        // quoting the 400-word summary as "the matching passage" would be
+        // inventing evidence.
+        let found = resolve_provenance(Some(MatchedOn::Summary), Some(note), config, false);
+        assert_eq!(found.match_type, Some("summary"));
+        assert!(found.matching_passage.is_none());
+        assert!(found.heading_path.is_none());
+        assert!(found.chunk_index.is_none());
+
+        // Hybrid blending is not attributable to one representation.
+        let found = resolve_provenance(None, Some(note), config, false);
+        assert!(found.match_type.is_none());
+    }
+
+    /// A heading containing the breadcrumb separator must not be split into two
+    /// levels. This is why the trail is carried as segments rather than parsed
+    /// back out of `"A > B"`.
+    #[cfg(has_embeddings)]
+    #[test]
+    fn heading_path_survives_a_heading_containing_the_separator() {
+        use crate::vault::chunker::{ChunkConfig, chunk_note};
+
+        let body = "# Costs > Benefits\n\nsome text under an awkward heading\n";
+        let chunks = chunk_note(body, ChunkConfig::default());
+        assert_eq!(
+            chunks[0].heading_path,
+            vec!["Costs > Benefits".to_string()],
+            "one heading, even though it contains the separator"
+        );
+    }
+
+    /// An out-of-range index must degrade, not panic. A note edited after it
+    /// was indexed can have fewer chunks than the stored key implies.
+    #[cfg(has_embeddings)]
+    #[test]
+    fn provenance_survives_a_stale_chunk_index() {
+        use crate::vault::chunker::ChunkConfig;
+        use crate::vault::embeddings::MatchedOn;
+
+        let found = resolve_provenance(
+            Some(MatchedOn::Chunk(999)),
+            Some("# Short\njust one chunk\n"),
+            ChunkConfig::default(),
+            false,
+        );
+        assert_eq!(found.match_type, Some("chunk"));
+        assert_eq!(found.chunk_index, Some(999));
+        assert!(found.heading_path.is_none() && found.matching_passage.is_none());
+    }
     #[cfg(has_embeddings)]
     use crate::config::EmbeddingProvider;
     use crate::test_helpers::{create_test_vault, extract_text, tantivy_config, test_config};

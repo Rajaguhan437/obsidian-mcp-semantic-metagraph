@@ -82,6 +82,29 @@ pub(crate) fn is_summary_key(key: &Path) -> bool {
         .is_some_and(|(_, suffix)| suffix == SUMMARY_MARKER)
 }
 
+/// The chunk index encoded in `key`, or None for a summary or note-level key.
+pub(crate) fn chunk_index_of(key: &Path) -> Option<usize> {
+    key.to_str()
+        .and_then(|s| s.split_once(CHUNK_SEP))
+        .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
+}
+
+/// Which stored representation produced a note's score.
+///
+/// Ranking only needs the score, but a caller usually wants to know *where* in
+/// the note the match is. `Chunk(i)` is resolvable back to a heading trail and
+/// the passage text by re-chunking the note with the same configuration --
+/// deterministic, and cheaper than storing the text a second time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MatchedOn {
+    /// The i-th chunk, in the order `chunk_note` produces them.
+    Chunk(usize),
+    /// The whole-note summary vector (title + headings + first 400 words).
+    Summary,
+    /// A legacy v1 whole-note entry, from a cache written before chunking.
+    WholeNote,
+}
+
 /// Weight applied to the summary arm, from `OBSIDIAN_SUMMARY_WEIGHT`.
 ///
 /// A weight of 0 disables the summary arm entirely (pure chunk retrieval).
@@ -331,7 +354,6 @@ impl EmbeddingStore {
         Ok(())
     }
 
-    /// Remove a note's embedding.
     /// Best (maximum) cosine similarity across every chunk of `note`.
     ///
     /// The hybrid re-ranker scores one BM25 candidate at a time BY NOTE PATH.
@@ -340,15 +362,36 @@ impl EmbeddingStore {
     /// and degrades hybrid search to pure BM25. Walk the note's chunks instead.
     /// Chunk keys are contiguous from 0, so this stops at the first gap.
     pub(crate) fn best_score_for_note(&self, note: &Path, query_vec: &[f32]) -> Option<f32> {
+        self.best_chunk_for_note(note, query_vec)
+            .map(|(score, _)| score)
+    }
+
+    /// As [`Self::best_score_for_note`], but also reports WHICH stored
+    /// representation won.
+    ///
+    /// The score alone is enough to rank, but not enough to tell a caller where
+    /// in the note the match actually is. Keeping the winning key lets
+    /// `search_semantic` return the matched passage and its heading trail
+    /// instead of only the note that contains it somewhere.
+    pub(crate) fn best_chunk_for_note(
+        &self,
+        note: &Path,
+        query_vec: &[f32],
+    ) -> Option<(f32, MatchedOn)> {
         // Legacy whole-note key (v1 caches) still answers directly.
         if let Some(entry) = self.embeddings.get(note) {
-            return Some(cosine_similarity(query_vec, &entry.vector));
+            return Some((
+                cosine_similarity(query_vec, &entry.vector),
+                MatchedOn::WholeNote,
+            ));
         }
-        let mut best: Option<f32> = None;
+        let mut best: Option<(f32, MatchedOn)> = None;
         let mut index = 0usize;
         while let Some(entry) = self.embeddings.get(&chunk_key(note, index)) {
             let score = cosine_similarity(query_vec, &entry.vector);
-            best = Some(best.map_or(score, |current: f32| current.max(score)));
+            if best.is_none_or(|(current, _)| score > current) {
+                best = Some((score, MatchedOn::Chunk(index)));
+            }
             index += 1;
         }
         // The summary arm competes with the best chunk, scaled by its weight.
@@ -356,7 +399,9 @@ impl EmbeddingStore {
         // note, never dilute one whose answer lives in a single chunk.
         if let Some(entry) = self.embeddings.get(&summary_key(note)) {
             let score = summary_weight() * cosine_similarity(query_vec, &entry.vector);
-            best = Some(best.map_or(score, |current: f32| current.max(score)));
+            if best.is_none_or(|(current, _)| score > current) {
+                best = Some((score, MatchedOn::Summary));
+            }
         }
         best
     }
@@ -422,7 +467,7 @@ impl EmbeddingStore {
     /// Drop entries for notes that no longer exist.
     ///
     /// `paths` holds NOTE paths, but entries are keyed by CHUNK
-    /// (`note <idx>`), so the membership test must resolve the key back to
+    /// (`note\0<idx>`), so the membership test must resolve the key back to
     /// its note first. Comparing raw keys against note paths matches nothing
     /// and silently wipes the whole cache on every startup, re-embedding the
     /// entire vault each run.
@@ -436,37 +481,64 @@ impl EmbeddingStore {
     /// Find the `top_k` most similar notes to `query_vec`, sorted by
     /// descending cosine similarity.
     pub fn query(&self, query_vec: &[f32], top_k: usize) -> Vec<(PathBuf, f32)> {
-        // Collapse chunk keys to note paths (best chunk wins) so every consumer
-        // of the store sees note-level results, exactly as before chunking.
-        Self::rank_scores(self.collapse_to_notes(query_vec, None), top_k)
+        Self::drop_provenance(self.query_detailed(query_vec, top_k))
     }
 
-    /// Score every chunk and reduce to one `(note, best_score)` per note.
+    /// As [`Self::query`], but keeps which representation matched.
+    pub(crate) fn query_detailed(
+        &self,
+        query_vec: &[f32],
+        top_k: usize,
+    ) -> Vec<(PathBuf, f32, MatchedOn)> {
+        // Collapse chunk keys to note paths (best chunk wins) so every consumer
+        // of the store sees note-level results, exactly as before chunking.
+        Self::rank_detailed(self.collapse_to_notes(query_vec, None), top_k)
+    }
+
+    fn drop_provenance(scored: Vec<(PathBuf, f32, MatchedOn)>) -> Vec<(PathBuf, f32)> {
+        scored
+            .into_iter()
+            .map(|(note, score, _)| (note, score))
+            .collect()
+    }
+
+    /// Score every chunk and reduce to one `(note, best_score, matched_on)`.
+    ///
+    /// The winning key is kept, not just its score, so a caller can report the
+    /// matched passage rather than only the note containing it.
     fn collapse_to_notes(
         &self,
         query_vec: &[f32],
         allowed: Option<&HashSet<PathBuf>>,
-    ) -> Vec<(PathBuf, f32)> {
+    ) -> Vec<(PathBuf, f32, MatchedOn)> {
         let weight = summary_weight();
-        let mut best: HashMap<PathBuf, f32> = HashMap::new();
+        let mut best: HashMap<PathBuf, (f32, MatchedOn)> = HashMap::new();
         for (key, entry) in self.embeddings.iter() {
             let note = note_path_of(key);
             if allowed.is_some_and(|set| !set.contains(note)) {
                 continue;
             }
             let mut score = cosine_similarity(query_vec, &entry.vector);
-            if is_summary_key(key) {
+            let matched = if is_summary_key(key) {
                 score *= weight;
-            }
+                MatchedOn::Summary
+            } else {
+                match chunk_index_of(key) {
+                    Some(index) => MatchedOn::Chunk(index),
+                    None => MatchedOn::WholeNote,
+                }
+            };
             best.entry(note.to_path_buf())
                 .and_modify(|slot| {
-                    if score > *slot {
-                        *slot = score;
+                    if score > slot.0 {
+                        *slot = (score, matched);
                     }
                 })
-                .or_insert(score);
+                .or_insert((score, matched));
         }
-        best.into_iter().collect()
+        best.into_iter()
+            .map(|(note, (score, matched))| (note, score, matched))
+            .collect()
     }
 
     pub(crate) fn query_paths(
@@ -475,18 +547,31 @@ impl EmbeddingStore {
         allowed_paths: &HashSet<PathBuf>,
         top_k: usize,
     ) -> Vec<(PathBuf, f32)> {
+        Self::drop_provenance(self.query_paths_detailed(query_vec, allowed_paths, top_k))
+    }
+
+    /// As [`Self::query_paths`], but keeps which representation matched.
+    pub(crate) fn query_paths_detailed(
+        &self,
+        query_vec: &[f32],
+        allowed_paths: &HashSet<PathBuf>,
+        top_k: usize,
+    ) -> Vec<(PathBuf, f32, MatchedOn)> {
         // Keys are chunk keys. Score every chunk, then collapse to one score per
         // note by taking its best chunk, so the hybrid fusion contract
         // (`alpha * BM25 + (1 - alpha) * semantic`, keyed by note path) is
         // preserved exactly as upstream expects.
-        Self::rank_scores(
+        Self::rank_detailed(
             self.collapse_to_notes(query_vec, Some(allowed_paths)),
             top_k,
         )
     }
 
-    fn rank_scores(mut scored: Vec<(PathBuf, f32)>, top_k: usize) -> Vec<(PathBuf, f32)> {
-        let cmp = |a: &(PathBuf, f32), b: &(PathBuf, f32)| {
+    fn rank_detailed(
+        mut scored: Vec<(PathBuf, f32, MatchedOn)>,
+        top_k: usize,
+    ) -> Vec<(PathBuf, f32, MatchedOn)> {
+        let cmp = |a: &(PathBuf, f32, MatchedOn), b: &(PathBuf, f32, MatchedOn)| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         };
 
@@ -1857,6 +1942,70 @@ mod tests {
             (score - 1.0).abs() < 1e-5,
             "expected best chunk to win, got {score}"
         );
+    }
+
+    /// The score alone cannot tell a caller where in a note the match is.
+    /// `best_chunk_for_note` must report the winning chunk's index so
+    /// `search_semantic` can return the passage and its heading trail.
+    #[test]
+    fn best_chunk_for_note_reports_which_chunk_won() {
+        let mut store = EmbeddingStore::new(3);
+        let note = PathBuf::from("deep.md");
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&note, 1), [0u8; 32], vec![0.0, 1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&note, 2), [0u8; 32], vec![0.0, 0.0, 1.0])
+            .unwrap();
+
+        let (_, matched) = store
+            .best_chunk_for_note(&note, &[0.0, 0.0, 1.0])
+            .expect("note must be scoreable");
+        assert_eq!(matched, MatchedOn::Chunk(2));
+
+        let (_, matched) = store
+            .best_chunk_for_note(&note, &[0.0, 1.0, 0.0])
+            .expect("note must be scoreable");
+        assert_eq!(matched, MatchedOn::Chunk(1));
+
+        // The score must not change now that provenance rides along with it.
+        let score = store.best_score_for_note(&note, &[0.0, 1.0, 0.0]).unwrap();
+        assert!((score - 1.0).abs() < 1e-5, "score changed: {score}");
+    }
+
+    /// The summary arm competes with the chunks, so it must be reportable as
+    /// the winner - otherwise a summary-won hit would claim a chunk it did not
+    /// match, which is worse than reporting nothing.
+    #[test]
+    fn best_chunk_for_note_reports_a_summary_win() {
+        let mut store = EmbeddingStore::new(2);
+        let note = PathBuf::from("summary-wins.md");
+        store
+            .insert_hashed(chunk_key(&note, 0), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(summary_key(&note), [0u8; 32], vec![0.0, 1.0])
+            .unwrap();
+
+        let (_, matched) = store
+            .best_chunk_for_note(&note, &[0.0, 1.0])
+            .expect("note must be scoreable");
+        assert_eq!(matched, MatchedOn::Summary);
+    }
+
+    /// A chunk key must resolve back to its index, and a summary key must not
+    /// masquerade as chunk 0 - that would mislabel every summary-won hit.
+    #[test]
+    fn chunk_index_round_trips_and_summary_is_not_a_chunk() {
+        let note = PathBuf::from("notes/alpha.md");
+        for i in [0usize, 1, 7, 42] {
+            assert_eq!(chunk_index_of(&chunk_key(&note, i)), Some(i));
+        }
+        assert_eq!(chunk_index_of(&summary_key(&note)), None);
+        assert_eq!(chunk_index_of(&note), None);
     }
 
     /// REGRESSION: status counted indexed notes with `store.get(path)`, which

@@ -42,8 +42,12 @@ pub struct Chunk {
     /// 0-based position of this chunk within the note.
     pub index: usize,
     /// `"H1 > H2 > H3"` for the section this chunk belongs to; empty above the
-    /// first heading.
+    /// first heading. This is the form embedded with the chunk text.
     pub breadcrumb: String,
+    /// The same trail as segments, outermost first; empty above the first
+    /// heading. Reported to callers instead of [`Self::breadcrumb`] because a
+    /// heading may itself contain `" > "`, making the joined form ambiguous.
+    pub heading_path: Vec<String>,
     /// Byte offset into the body this chunk starts at.
     pub offset: usize,
     pub text: String,
@@ -97,9 +101,18 @@ impl ChunkConfig {
 }
 
 struct Section {
-    breadcrumb: String,
+    /// Heading trail as segments, outermost first. Empty above the first
+    /// heading. Kept as segments rather than a joined string because a heading
+    /// may itself contain the `" > "` separator, which makes the joined form
+    /// ambiguous to split back apart.
+    path: Vec<String>,
     start: usize,
     end: usize,
+}
+
+/// Joined form of a heading trail, as embedded with each chunk.
+fn crumb(path: &[String]) -> String {
+    path.join(" > ")
 }
 
 /// Split `body` into heading-delimited sections, tracking the breadcrumb stack.
@@ -110,7 +123,7 @@ fn sections(body: &str) -> Vec<Section> {
     let mut in_fence = false;
     let mut fence_marker = ' ';
     let mut current_start = 0usize;
-    let mut current_crumb = String::new();
+    let mut current_path: Vec<String> = Vec::new();
 
     let mut offset = 0usize;
     for line in body.split_inclusive('\n') {
@@ -137,7 +150,7 @@ fn sections(body: &str) -> Vec<Section> {
                 // Close the section that ended here.
                 if offset > current_start {
                     out.push(Section {
-                        breadcrumb: current_crumb.clone(),
+                        path: current_path.clone(),
                         start: current_start,
                         end: offset,
                     });
@@ -148,11 +161,7 @@ fn sections(body: &str) -> Vec<Section> {
                     stack.pop();
                 }
                 stack.push((level, text));
-                current_crumb = stack
-                    .iter()
-                    .map(|(_, t)| t.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" > ");
+                current_path = stack.iter().map(|(_, t)| t.clone()).collect();
                 current_start = offset;
             }
         }
@@ -161,7 +170,7 @@ fn sections(body: &str) -> Vec<Section> {
 
     if body.len() > current_start {
         out.push(Section {
-            breadcrumb: current_crumb,
+            path: current_path,
             start: current_start,
             end: body.len(),
         });
@@ -183,7 +192,7 @@ fn packed_sections(body: &str, target: usize) -> Vec<Section> {
     let mut i = 0usize;
     while i < raw.len() {
         let start = raw[i].start;
-        let crumb = raw[i].breadcrumb.clone();
+        let path = raw[i].path.clone();
         let mut end = raw[i].end;
         if end - start <= target {
             let mut j = i + 1;
@@ -195,11 +204,7 @@ fn packed_sections(body: &str, target: usize) -> Vec<Section> {
         } else {
             i += 1;
         }
-        out.push(Section {
-            breadcrumb: crumb,
-            start,
-            end,
-        });
+        out.push(Section { path, start, end });
     }
     out
 }
@@ -277,7 +282,8 @@ pub fn chunk_note(body: &str, config: ChunkConfig) -> Vec<Chunk> {
             if !piece.trim().is_empty() {
                 chunks.push(Chunk {
                     index: chunks.len(),
-                    breadcrumb: section.breadcrumb.clone(),
+                    breadcrumb: crumb(&section.path),
+                    heading_path: section.path.clone(),
                     offset: section.start + cursor,
                     text: piece.trim().to_string(),
                 });

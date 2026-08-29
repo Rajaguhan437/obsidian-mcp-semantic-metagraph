@@ -176,6 +176,19 @@ impl EmbeddingQuerySnapshot {
         Ok(store.query_paths(&query_vector, allowed_paths, top_k))
     }
 
+    /// As [`Self::semantic_scores_for_paths`], but reports which representation
+    /// matched so the caller can resolve it to a passage and heading trail.
+    pub(crate) fn semantic_hits_for_paths(
+        &self,
+        query: &str,
+        allowed_paths: &HashSet<PathBuf>,
+        top_k: usize,
+    ) -> VaultResult<Vec<(PathBuf, f32, super::embeddings::MatchedOn)>> {
+        let query_vector = self.embed_query(query)?;
+        let store = self.store.read().unwrap_or_else(|error| error.into_inner());
+        Ok(store.query_paths_detailed(&query_vector, allowed_paths, top_k))
+    }
+
     /// Semantic score for one note: the best of its chunks, versus its summary
     /// scaled by `OBSIDIAN_SUMMARY_WEIGHT`.
     ///

@@ -526,6 +526,26 @@ impl Vault {
     /// similarity.
     #[cfg(has_embeddings)]
     pub fn search_semantic(&self, query: &str, top_k: usize) -> VaultResult<Vec<(PathBuf, f32)>> {
+        Ok(self
+            .search_semantic_detailed(query, top_k)?
+            .into_iter()
+            .map(|(path, score, _)| (path, score))
+            .collect())
+    }
+
+    /// As [`Self::search_semantic`], but reports which stored representation
+    /// matched each note.
+    ///
+    /// The provenance is `None` on the experimental hybrid path: once a lexical
+    /// arm is blended in, the rank is no longer attributable to a single
+    /// passage, and reporting one anyway would be a claim the score does not
+    /// support.
+    #[cfg(has_embeddings)]
+    pub(crate) fn search_semantic_detailed(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> VaultResult<Vec<(PathBuf, f32, Option<embeddings::MatchedOn>)>> {
         let runtime = self.inner.embedding_runtime.as_ref().ok_or_else(|| {
             VaultError::Embedding("embeddings not enabled (OBSIDIAN_EMBEDDINGS=false)".into())
         })?;
@@ -539,9 +559,17 @@ impl Vault {
         let weight = embeddings::lexical_weight();
         if weight <= 0.0 {
             // Default path. Untouched by the experimental hybrid setting.
-            return snapshot.semantic_scores_for_paths(query, &current_paths, top_k);
+            return Ok(snapshot
+                .semantic_hits_for_paths(query, &current_paths, top_k)?
+                .into_iter()
+                .map(|(path, score, matched)| (path, score, Some(matched)))
+                .collect());
         }
-        self.blend_lexical(query, &snapshot, &current_paths, top_k, weight)
+        Ok(self
+            .blend_lexical(query, &snapshot, &current_paths, top_k, weight)?
+            .into_iter()
+            .map(|(path, score)| (path, score, None))
+            .collect())
     }
 
     /// Experimental hybrid ranking, only reachable when OBSIDIAN_LEXICAL_WEIGHT
