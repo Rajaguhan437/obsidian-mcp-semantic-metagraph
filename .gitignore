@@ -7,3 +7,6 @@ target/
 tmp/
 .fastembed_cache/
 tests/fixtures/test_vault/.obsidian-mcp/
+bench-out/
+__pycache__/
+*.pyc

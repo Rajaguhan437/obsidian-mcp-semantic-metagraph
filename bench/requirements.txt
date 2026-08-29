@@ -1,0 +1,6 @@
+# Core evaluation (run_eval.py, proxy.py, make_queries.py, graph_*.py) needs
+# only the standard library. These are for the offline sweep and for memory
+# figures.
+
+numpy>=1.24        # chunk_sweep.py: scores every config as matrix arithmetic
+psutil>=5.9        # optional: cross-platform peak-memory; degrades to 0 without it

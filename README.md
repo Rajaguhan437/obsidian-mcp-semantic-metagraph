@@ -310,6 +310,14 @@ from it.
 - [docs/TOOLS.md](docs/TOOLS.md) — tool reference
 - [docs/PROJECT_LOG.md](docs/PROJECT_LOG.md) — how this was built, including what went wrong
 - [docs/METHODOLOGY.md](docs/METHODOLOGY.md) — transferable evaluation lessons
+- [CONTRIBUTING.md](CONTRIBUTING.md) — building, testing, and the platform gotchas
+- [bench/README.md](bench/README.md) — the evaluation harness, and running it on
+  your own vault
+
+The harness ships **without a corpus**: the development vault is a private set of
+personal notes and the query set quotes their contents. You can run the same
+procedure on your own vault, but you cannot reproduce the exact numbers reported
+here — which is consistent with the defaults being corpus-dependent.
 
 ## Naming
 
