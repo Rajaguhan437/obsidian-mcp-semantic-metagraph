@@ -18,6 +18,17 @@ summary vector alongside them. That summary is still built from the first 400
 words - deliberately, as a second and coarser representation rather than the
 primary one.
 
+**The code is smaller than what it forked.** `src/` and `tests/` come to a net
+**−1,986 lines** against upstream — 2,198 added, 4,184 removed, 11 files deleted
+and 1 added. Most of the deletion is a self-updater that reinstalled the
+*upstream* crates.io package over itself, which is actively wrong in a fork. The
+repository as a whole did grow, but only in documentation and the benchmark
+harness. Check it in one command:
+
+```bash
+git diff --shortstat fea2e1f..HEAD -- src/ tests/
+```
+
 On the vault it was developed against that moved retrieval nDCG from **0.834 to
 0.939**, and on queries whose answer sits past the truncation point, from
 **0.552 to 0.941**.
