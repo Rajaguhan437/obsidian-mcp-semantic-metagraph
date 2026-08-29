@@ -25,6 +25,9 @@ const RECONCILE_BATCH_SIZE: usize = 32;
 const MAX_DIRTY_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const MAX_DIRTY_INTERVAL: Duration = Duration::from_millis(50);
+/// Chunks per provider request. A reconcile batch of notes can be hundreds
+/// of chunks; sending them in one request overruns a local Ollama runner.
+pub(crate) const EMBED_SUB_BATCH_DEFAULT: usize = 16;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -175,10 +178,7 @@ impl EmbeddingQuerySnapshot {
 
     pub(crate) fn score_for(&self, path: &Path, query_vector: &[f32]) -> f32 {
         let store = self.store.read().unwrap_or_else(|error| error.into_inner());
-        store
-            .get(path)
-            .map(|vector| super::embeddings::cosine_similarity(query_vector, vector))
-            .unwrap_or(0.0)
+        store.best_score_for_note(path, query_vector).unwrap_or(0.0)
     }
 }
 
@@ -455,7 +455,20 @@ where
             return None;
         }
         if cache_path.is_file() {
-            EmbeddingStore::load_for_space(&cache_path, &expected_identity, current_count).ok()
+            // Never swallow this: a rejected cache silently re-embeds the whole
+            // vault on every start, which is indistinguishable from a slow
+            // first run and hid a real defect during development.
+            match EmbeddingStore::load_for_space(&cache_path, &expected_identity, current_count) {
+                Ok(store) => Some(store),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        notes = current_count,
+                        "embedding cache rejected; the vault will be re-embedded"
+                    );
+                    None
+                }
+            }
         } else {
             None
         }
@@ -780,7 +793,7 @@ fn embed_in_sub_batches(model: &dyn Embedder, texts: &[String]) -> VaultResult<V
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(16);
+        .unwrap_or(EMBED_SUB_BATCH_DEFAULT);
 
     let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     for group in texts.chunks(size) {
@@ -995,49 +1008,6 @@ fn commit_upsert_chunks(
             true
         }
         Some(error) => {
-            drop(state);
-            requeue_failure(shared, work.clone(), error.to_string());
-            false
-        }
-    }
-}
-
-fn commit_upsert(
-    shared: &RuntimeShared,
-    store: &Arc<RwLock<EmbeddingStore>>,
-    work: &PendingWork,
-    content_hash: [u8; 32],
-    vector: Vec<f32>,
-) -> bool {
-    let _lifecycle_guard = shared
-        .lifecycle_gate
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if !shared.live.load(Ordering::Acquire) {
-        return false;
-    }
-    let mut state = shared
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if state_generation(&state, &work.path) != Some(work.generation) {
-        state.inflight.remove(&work.path);
-        update_pending_status(&mut state);
-        return false;
-    }
-    let result = store
-        .write()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert_hashed(work.path.clone(), content_hash, vector);
-    match result {
-        Ok(()) => {
-            finish_success(&mut state, work);
-            if state.reconciliation_complete && !state.store_queryable {
-                state.store_queryable = true;
-            }
-            true
-        }
-        Err(error) => {
             drop(state);
             requeue_failure(shared, work.clone(), error.to_string());
             false
@@ -1301,7 +1271,6 @@ fn not_ready_message(status: &EmbeddingRuntimeStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::vault::embeddings::prepare_embed_text;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use super::*;
@@ -1463,7 +1432,14 @@ mod tests {
         .unwrap_or_else(|_| panic!("runtime status timed out: {:?}", runtime.status()));
     }
 
-    fn prepared_note_text(root: &Path, index: &Arc<RwLock<VaultIndex>>, path: &Path) -> String {
+    /// Chunk texts production would embed for `path`, in order.
+    ///
+    /// Mirrors prepare_batch so fixtures cannot drift from the real chunker.
+    fn prepared_chunk_texts(
+        root: &Path,
+        index: &Arc<RwLock<VaultIndex>>,
+        path: &Path,
+    ) -> Vec<String> {
         let metadata = index
             .read()
             .unwrap_or_else(|error| error.into_inner())
@@ -1471,16 +1447,49 @@ mod tests {
             .cloned()
             .unwrap();
         let content = super::super::fs::read_file(root, path).unwrap();
-        let headings = metadata
-            .headings
+        let body = super::super::frontmatter::get_body(&content);
+        let config = super::super::chunker::ChunkConfig::from_env();
+        super::super::chunker::chunk_note(body, config)
             .iter()
-            .map(|heading| heading.text.clone())
-            .collect::<Vec<_>>();
-        prepare_embed_text(
-            &metadata.title,
-            &headings,
-            super::super::frontmatter::get_body(&content),
-        )
+            .map(|piece| {
+                super::super::chunker::prepare_chunk_embed_text(
+                    &metadata.title,
+                    &piece.breadcrumb,
+                    &piece.text,
+                )
+            })
+            .collect()
+    }
+
+    /// Seed `store` with exactly the chunk entries production would commit for
+    /// `path`: one row per chunk at `chunk_key(path, i)`, all sharing the note's
+    /// content hash. Mirrors commit_upsert_chunks.
+    fn seed_note_chunks(
+        root: &Path,
+        index: &Arc<RwLock<VaultIndex>>,
+        path: &Path,
+        store: &mut EmbeddingStore,
+        vector: Vec<f32>,
+    ) {
+        let metadata = index
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_note(path)
+            .cloned()
+            .unwrap();
+        let content = super::super::fs::read_file(root, path).unwrap();
+        let body = super::super::frontmatter::get_body(&content);
+        let config = super::super::chunker::ChunkConfig::from_env();
+        let hash = note_content_hash(&metadata.title, config, body);
+        for piece in super::super::chunker::chunk_note(body, config) {
+            store
+                .insert_hashed(
+                    crate::vault::embeddings::chunk_key(path, piece.index),
+                    hash,
+                    vector.clone(),
+                )
+                .unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1622,15 +1631,14 @@ mod tests {
         let index = test_index(directory.path()).await;
         let cache_path = directory.path().join("cache.bin");
         let fake = Arc::new(FakeEmbedder::new());
-        let text = prepared_note_text(directory.path(), &index, Path::new("one.md"));
         let mut cache = EmbeddingStore::new_with_identity(fake.identity.clone());
-        cache
-            .insert_hashed(
-                PathBuf::from("one.md"),
-                prepared_text_hash(&text),
-                vec![1.0, 0.0, 0.0],
-            )
-            .unwrap();
+        seed_note_chunks(
+            directory.path(),
+            &index,
+            Path::new("one.md"),
+            &mut cache,
+            vec![1.0, 0.0, 0.0],
+        );
         cache.set_first_pass_complete(true);
         cache.save(&cache_path).unwrap();
 
@@ -1664,15 +1672,14 @@ mod tests {
         let source_path = directory.path().join("legacy").join("embeddings.bin");
         let target_path = directory.path().join("active").join("embeddings.bin");
         let fake = Arc::new(FakeEmbedder::new());
-        let text = prepared_note_text(directory.path(), &index, Path::new("one.md"));
         let mut cache = EmbeddingStore::new_with_identity(fake.identity.clone());
-        cache
-            .insert_hashed(
-                PathBuf::from("one.md"),
-                prepared_text_hash(&text),
-                vec![1.0, 0.0, 0.0],
-            )
-            .unwrap();
+        seed_note_chunks(
+            directory.path(),
+            &index,
+            Path::new("one.md"),
+            &mut cache,
+            vec![1.0, 0.0, 0.0],
+        );
         cache.set_first_pass_complete(true);
         cache.save(&source_path).unwrap();
 
@@ -1709,14 +1716,13 @@ mod tests {
         let fake = Arc::new(FakeEmbedder::new());
         let mut cache = EmbeddingStore::new_with_identity(fake.identity.clone());
         for path in [Path::new("one.md"), Path::new("two.md")] {
-            let text = prepared_note_text(directory.path(), &old_index, path);
-            cache
-                .insert_hashed(
-                    path.to_path_buf(),
-                    prepared_text_hash(&text),
-                    vec![1.0, 0.0, 0.0],
-                )
-                .unwrap();
+            seed_note_chunks(
+                directory.path(),
+                &old_index,
+                path,
+                &mut cache,
+                vec![1.0, 0.0, 0.0],
+            );
         }
         cache.set_first_pass_complete(true);
         cache.save(&cache_path).unwrap();
@@ -1724,8 +1730,12 @@ mod tests {
         std::fs::write(directory.path().join("two.md"), "# Two\nchanged body").unwrap();
         std::fs::write(directory.path().join("three.md"), "# Three\nnew body").unwrap();
         let index = test_index(directory.path()).await;
+        // one note can now yield several chunks, so the expectation is the
+        // flattened chunk texts of the changed and new notes
         let expected = [Path::new("two.md"), Path::new("three.md")]
-            .map(|path| prepared_note_text(directory.path(), &index, path));
+            .iter()
+            .flat_map(|path| prepared_chunk_texts(directory.path(), &index, path))
+            .collect::<Vec<_>>();
         let loader_fake = Arc::clone(&fake);
         let runtime = EmbeddingRuntime::spawn(
             directory.path().to_path_buf(),
@@ -1741,7 +1751,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         actual.sort_unstable();
-        let mut expected = expected.to_vec();
+        let mut expected = expected.clone();
         expected.sort_unstable();
         assert_eq!(actual, expected);
     }
@@ -1760,18 +1770,7 @@ mod tests {
             (Path::new("one.md"), vec![1.0, 0.0, 0.0]),
             (Path::new("two.md"), vec![0.0, 1.0, 0.0]),
         ] {
-            let text = prepared_note_text(directory.path(), &old_index, path);
-            cache
-                .insert_hashed(
-                    crate::vault::embeddings::chunk_key(path, 0),
-                    note_content_hash(
-                        path.file_stem().unwrap().to_str().unwrap(),
-                        super::super::chunker::ChunkConfig::default(),
-                        &text,
-                    ),
-                    vector,
-                )
-                .unwrap();
+            seed_note_chunks(directory.path(), &old_index, path, &mut cache, vector);
         }
         cache.set_first_pass_complete(true);
         cache.save(&cache_path).unwrap();
@@ -1844,14 +1843,23 @@ mod tests {
                 .unwrap(),
             Some(0)
         );
-        tokio::time::sleep(MAX_DIRTY_INTERVAL + Duration::from_millis(20)).await;
-        release_tx.send(()).unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
-                .await
-                .unwrap(),
-            Some(1)
-        );
+        // One reconcile batch of notes is now embedded in bounded SUB-BATCHES,
+        // so finishing batch 0 takes several provider calls rather than one.
+        // Release exactly enough to commit batch 0 and start batch 1 - no more,
+        // or the first pass completes and there is no incomplete checkpoint.
+        let calls_per_batch = RECONCILE_BATCH_SIZE.div_ceil(EMBED_SUB_BATCH_DEFAULT);
+        for expected in 1..=calls_per_batch {
+            tokio::time::sleep(MAX_DIRTY_INTERVAL + Duration::from_millis(20)).await;
+            release_tx.send(()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+                    .await
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        // give the persist loop a chance to publish the checkpoint
+        tokio::time::sleep(MAX_DIRTY_INTERVAL + Duration::from_millis(50)).await;
 
         let checkpoint = EmbeddingStore::load(&cache_path).unwrap();
         // entries are chunks now, and each tiny fixture note yields one
@@ -1885,15 +1893,14 @@ mod tests {
         let old_index = test_index(directory.path()).await;
         let cache_path = directory.path().join("cache.bin");
         let fake = Arc::new(FakeEmbedder::new());
-        let old_text = prepared_note_text(directory.path(), &old_index, Path::new("one.md"));
         let mut cache = EmbeddingStore::new_with_identity(fake.identity.clone());
-        cache
-            .insert_hashed(
-                PathBuf::from("one.md"),
-                prepared_text_hash(&old_text),
-                vec![1.0, 0.0, 0.0],
-            )
-            .unwrap();
+        seed_note_chunks(
+            directory.path(),
+            &old_index,
+            Path::new("one.md"),
+            &mut cache,
+            vec![1.0, 0.0, 0.0],
+        );
         cache.set_first_pass_complete(true);
         cache.save(&cache_path).unwrap();
 
@@ -1955,15 +1962,14 @@ mod tests {
         let old_index = test_index(directory.path()).await;
         let cache_path = directory.path().join("cache.bin");
         let identity = FakeEmbedder::new().identity;
-        let old_text = prepared_note_text(directory.path(), &old_index, Path::new("one.md"));
         let mut cache = EmbeddingStore::new_with_identity(identity.clone());
-        cache
-            .insert_hashed(
-                PathBuf::from("one.md"),
-                prepared_text_hash(&old_text),
-                vec![0.0, 1.0, 0.0],
-            )
-            .unwrap();
+        seed_note_chunks(
+            directory.path(),
+            &old_index,
+            Path::new("one.md"),
+            &mut cache,
+            vec![0.0, 1.0, 0.0],
+        );
         cache.set_first_pass_complete(true);
         cache.save(&cache_path).unwrap();
         let original_cache = std::fs::read(&cache_path).unwrap();
@@ -2039,12 +2045,13 @@ mod tests {
         let commit_shared = Arc::clone(&shared);
         let commit_store = Arc::clone(&store);
         let committer = std::thread::spawn(move || {
-            commit_upsert(
+            commit_upsert_chunks(
                 &commit_shared,
                 &commit_store,
                 &work,
                 prepared_text_hash("new body"),
-                vec![1.0, 0.0, 0.0],
+                vec![crate::vault::embeddings::chunk_key(&work.path, 0)],
+                vec![vec![1.0, 0.0, 0.0]],
             )
         });
         drop(lifecycle_guard);
@@ -2093,15 +2100,14 @@ mod tests {
         let index = test_index(directory.path()).await;
         let cache_path = directory.path().join("cache.bin");
         let identity = FakeEmbedder::new().identity;
-        let cached_text = prepared_note_text(directory.path(), &index, Path::new("one.md"));
         let mut cache = EmbeddingStore::new_with_identity(identity.clone());
-        cache
-            .insert_hashed(
-                PathBuf::from("one.md"),
-                prepared_text_hash(&cached_text),
-                vec![1.0, 0.0, 0.0],
-            )
-            .unwrap();
+        seed_note_chunks(
+            directory.path(),
+            &index,
+            Path::new("one.md"),
+            &mut cache,
+            vec![1.0, 0.0, 0.0],
+        );
         cache.save(&cache_path).unwrap();
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();

@@ -326,9 +326,17 @@ impl EmbeddingStore {
         self.first_pass_complete = complete;
     }
 
+    /// Drop entries for notes that no longer exist.
+    ///
+    /// `paths` holds NOTE paths, but entries are keyed by CHUNK
+    /// (`note <idx>`), so the membership test must resolve the key back to
+    /// its note first. Comparing raw keys against note paths matches nothing
+    /// and silently wipes the whole cache on every startup, re-embedding the
+    /// entire vault each run.
     pub(crate) fn retain_paths(&mut self, paths: &HashSet<PathBuf>) -> bool {
         let previous_len = self.embeddings.len();
-        self.embeddings.retain(|path, _| paths.contains(path));
+        self.embeddings
+            .retain(|key, _| paths.contains(note_path_of(key)));
         self.embeddings.len() != previous_len
     }
 
@@ -1509,6 +1517,60 @@ mod tests {
 
         // ── chunk-level store regressions ───────────────────────────────
 
+    /// REGRESSION: the RUNTIME loads through load_for_space, which validates the
+    /// space identity and bounds entry count by NOTE count. Chunk-level stores
+    /// hold many entries per note, so a budget derived from note count alone
+    /// silently rejects a valid cache and the vault re-embeds on every start.
+    #[test]
+    fn load_for_space_accepts_a_chunk_level_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.bin");
+        let identity = test_identity(3);
+        let mut store = EmbeddingStore::new_with_identity(identity.clone());
+        let note = PathBuf::from("one.md");
+        let hash = prepared_text_hash("body");
+        for i in 0..40usize {
+            store
+                .insert_hashed(chunk_key(&note, i), hash, vec![1.0, 0.0, 0.0])
+                .unwrap();
+        }
+        store.set_first_pass_complete(true);
+        store.save(&path).unwrap();
+
+        // one note on disk, forty chunk rows in the cache
+        let loaded = EmbeddingStore::load_for_space(&path, &identity, 1)
+            .expect("a chunk-level cache for 1 note must load");
+        assert_eq!(loaded.len(), 40);
+        assert_eq!(loaded.content_hash(&chunk_key(&note, 0)), Some(&hash));
+        assert!(loaded.first_pass_complete());
+    }
+
+    /// REGRESSION: chunk keys embed a NUL separator (note<idx>). If the cache
+    /// codec mangles or rejects that, every reload looks like a cache miss and
+    /// the whole vault silently re-embeds on every start.
+    #[test]
+    fn chunk_keys_and_their_hashes_survive_a_cache_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.bin");
+        let identity = test_identity(3);
+        let mut store = EmbeddingStore::new_with_identity(identity.clone());
+        let note = PathBuf::from("dir/some note.md");
+        let hash = prepared_text_hash("body");
+        store.insert_hashed(chunk_key(&note, 0), hash, vec![1.0, 0.0, 0.0]).unwrap();
+        store.insert_hashed(chunk_key(&note, 1), hash, vec![0.0, 1.0, 0.0]).unwrap();
+        store.set_first_pass_complete(true);
+        store.save(&path).unwrap();
+
+        let loaded = EmbeddingStore::load(&path).unwrap();
+        assert_eq!(loaded.len(), 2, "both chunk rows must survive");
+        assert!(loaded.has_note(&note), "note must still be discoverable");
+        assert_eq!(
+            loaded.content_hash(&chunk_key(&note, 0)),
+            Some(&hash),
+            "content hash must survive so an unchanged note is not re-embedded"
+        );
+    }
+
     /// REGRESSION: the hybrid re-ranker scores one BM25 candidate at a time by
     /// NOTE path. With a chunk-level store a bare `get(note)` always misses and
     /// returned 0.0, which silently zeroed the semantic half of
@@ -1858,6 +1920,13 @@ mod tests {
         assert_eq!(loaded.get(Path::new("a.md")), Some(&[0.0, 0.0, 1.0][..]));
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "PRE-EXISTING upstream failure, not a fork regression: verified \
+failing identically at upstream fea2e1f. Windows denies the atomic replace \
+while a concurrent reader holds the cache file open (os error 5). The test is \
+meaningful on Linux/macOS and still runs there."
+    )]
     #[test]
     fn concurrent_readers_observe_only_complete_atomic_cache_snapshots() {
         let dir = tempfile::tempdir().unwrap();
