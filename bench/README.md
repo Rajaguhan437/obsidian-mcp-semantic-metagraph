@@ -22,6 +22,7 @@ reason the defaults here are stated as corpus-dependent.
 | `chunk_sweep.py` | offline sweep of chunk size / overlap / summary weight, with a Pareto front |
 | `graph_baseline.py` | capture the full link graph (backlinks, outgoing, broken, orphans) |
 | `graph_diff.py` | compare two graph captures; exits non-zero on any change |
+| `verify_tools_doc.py` | check `docs/TOOLS.md` against the `Params` structs and profile lists; exits non-zero on drift |
 
 ## Setup
 
