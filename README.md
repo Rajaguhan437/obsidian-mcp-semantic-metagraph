@@ -9,8 +9,11 @@ Obsidian plugin and no REST API.
 
 This is a **fork of [lstpsche/obsidian-mcp](https://github.com/lstpsche/obsidian-mcp)**
 that rebuilds the semantic retrieval layer. Upstream embedded one vector per note
-from a body truncated to 400 words; this fork indexes the whole note as
-heading-aware chunks and keeps a note-level summary vector alongside them.
+from a body truncated to 400 words; this fork indexes the **note body** as
+heading-aware chunks, so no part of it is unreachable, and keeps a note-level
+summary vector alongside them. That summary is still built from the first 400
+words - deliberately, as a second and coarser representation rather than the
+primary one.
 
 On the vault it was developed against that moved retrieval nDCG from **0.834 to
 0.939**, and on queries whose answer sits past the truncation point, from
@@ -71,9 +74,14 @@ Detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Retrieval provenance
 
-Every semantic hit says **why** it ranked, and hands back the passage responsible
-where there is one. An agent gets "this exact section matched" rather than "this
-note is relevant somewhere."
+Every semantic hit reports **which representation determined its rank** and, when
+the note has chunks, the most relevant passage from that note.
+
+Those are two different claims, and the API keeps them apart. For a **chunk win**
+the passage *is* the reason the note ranked. For a **summary win** the note
+ranked as a whole and the passage is supporting evidence, not the cause.
+`match_type` is what distinguishes them - branch on it, not on whether a passage
+is present.
 
 ```json
 {
@@ -292,6 +300,19 @@ case, so it stays — inert unless `OBSIDIAN_SEMANTIC_MODE` selects it.
 ## Benchmark results
 
 Same vault, queries, gold labels and embedding model throughout. nDCG@10.
+Every figure in this table is from the **live server**.
+
+**Why some numbers elsewhere are slightly higher.** Parameter exploration - chunk
+size, `w_sum`, the fusion sweep - was run offline against cached vectors using a
+Python replica of the chunker. That replica is not bit-identical to the Rust
+implementation and scores roughly 0.005-0.015 higher. It is why the fusion
+diagnostic below reads 1.000 on the exact-keyword stratum where this table reads
+0.985, and why the `w_sum` sweep reports .9442 overall where the live run reports
+.939. The offset applies uniformly to every configuration being compared, so it
+never changes which option wins - only the absolute value. Where the two contexts
+were checked against each other directly - the share of hits attributable to a
+chunk - they agreed to within 0.2 percentage points (27.5% predicted offline,
+27.3% measured live).
 
 | stratum | upstream | chunks only | **this fork** |
 |---|---|---|---|
