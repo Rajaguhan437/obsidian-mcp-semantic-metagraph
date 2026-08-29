@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+// Only `daemonize()` uses this, and that is Windows-only.
+#[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use obsidian_mcp::error::VaultError;
 use obsidian_mcp::tools::{ObsidianMcp, SemanticRuntime};
 use obsidian_mcp::vault::Vault;
 
+#[cfg(windows)]
 const DEFAULT_PORT: u16 = 37842;
 
 tokio::task_local! {
@@ -347,6 +350,7 @@ async fn handle_cli_flags() -> Option<i32> {
     }
 }
 
+#[cfg(windows)]
 fn subcommand_wants_help() -> bool {
     std::env::args().any(|a| a == "--help" || a == "-h")
 }
@@ -405,6 +409,7 @@ fn print_help() {
     );
 }
 
+#[cfg(windows)]
 /// Resolve the HTTP port from CLI args and env, skipping subcommand names.
 fn resolve_port_from_args() -> u16 {
     let mut port = DEFAULT_PORT;
@@ -426,6 +431,7 @@ fn resolve_port_from_args() -> u16 {
     port
 }
 
+#[cfg(windows)]
 /// Spawn a detached child running `--http` and exit the parent.
 /// Kills any existing server on the target port first.
 fn daemonize() -> Result<(), Box<dyn std::error::Error>> {
@@ -522,12 +528,14 @@ fn daemonize() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+#[cfg(windows)]
 fn is_port_in_use(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok()
 }
 
+#[cfg(windows)]
 fn probe_health(port: u16) -> bool {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
@@ -552,6 +560,7 @@ fn probe_health(port: u16) -> bool {
     resp.contains("200") && resp.contains("\"status\":\"ok\"")
 }
 
+#[cfg(windows)]
 /// Stop all servers on `port`. Returns `Err` if the port cannot be freed.
 fn stop_existing_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     use std::net::{SocketAddr, TcpStream};
@@ -592,6 +601,7 @@ fn stop_existing_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     Err(format!("port {port} is still in use after stopping 5 processes").into())
 }
 
+#[cfg(windows)]
 fn stop_process(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     send_signal(pid, false);
     if !wait_for_process_exit(pid, 50) {
@@ -604,6 +614,7 @@ fn stop_process(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn wait_for_process_exit(pid: u32, ticks: u32) -> bool {
     for _ in 0..ticks {
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -614,16 +625,6 @@ fn wait_for_process_exit(pid: u32, ticks: u32) -> bool {
     false
 }
 
-#[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
 #[cfg(windows)]
 fn is_process_alive(pid: u32) -> bool {
     std::process::Command::new("tasklist")
@@ -632,18 +633,6 @@ fn is_process_alive(pid: u32) -> bool {
         .stderr(Stdio::null())
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-}
-
-#[cfg(unix)]
-fn find_pid_on_port(port: u16) -> Option<u32> {
-    let output = std::process::Command::new("lsof")
-        .args(["-ti", &format!("tcp:{port}")])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|s| s.parse::<u32>().ok())
-        .find(|&pid| pid != std::process::id())
 }
 
 #[cfg(windows)]
@@ -660,14 +649,6 @@ fn find_pid_on_port(port: u16) -> Option<u32> {
         .filter(|&pid| pid != std::process::id())
 }
 
-#[cfg(unix)]
-fn send_signal(pid: u32, force: bool) {
-    let sig = if force { "-KILL" } else { "-TERM" };
-    let _ = std::process::Command::new("kill")
-        .args([sig, &pid.to_string()])
-        .status();
-}
-
 #[cfg(windows)]
 fn send_signal(pid: u32, force: bool) {
     let mut args = vec!["/PID".to_string(), pid.to_string()];
@@ -677,6 +658,7 @@ fn send_signal(pid: u32, force: bool) {
     let _ = std::process::Command::new("taskkill").args(&args).status();
 }
 
+#[cfg(windows)]
 fn daemon_log_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     {
@@ -717,8 +699,8 @@ fn endpoint_from_override(raw: &str) -> IpcEndpoint {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use super::*;
+    use std::path::PathBuf;
 
     fn runtime_config(mode: SemanticMode) -> SemanticRuntimeConfig {
         SemanticRuntimeConfig {

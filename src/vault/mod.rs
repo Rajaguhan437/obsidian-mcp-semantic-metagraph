@@ -533,11 +533,9 @@ impl Vault {
             .collect())
     }
 
-    /// Rank-affecting behaviour lives in [`Self::search_semantic`]; this is the
-    /// same ranking with the evidence attached.
-
     /// As [`Self::search_semantic`], but reports which stored representation
-    /// matched each note.
+    /// matched each note. The ranking is identical; the evidence is carried
+    /// alongside it.
     ///
     /// The provenance is `None` on the experimental hybrid path: once a lexical
     /// arm is blended in, the rank is no longer attributable to a single

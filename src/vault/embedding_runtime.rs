@@ -832,10 +832,9 @@ fn embed_in_sub_batches(model: &dyn Embedder, texts: &[String]) -> VaultResult<V
         let mut last_error: Option<VaultError> = None;
         let mut done = false;
         for attempt in 0..MAX_ATTEMPTS {
-            match model
-                .embed_batch(&refs)
-                .and_then(|vectors| validate_embedding_batch(vectors, refs.len(), model.dimension()))
-            {
+            match model.embed_batch(&refs).and_then(|vectors| {
+                validate_embedding_batch(vectors, refs.len(), model.dimension())
+            }) {
                 Ok(vectors) => {
                     out.extend(vectors);
                     done = true;
@@ -890,7 +889,6 @@ pub(crate) fn note_content_hash(
         title, config.target, config.overlap, body
     ))
 }
-
 
 fn prepare_batch(
     vault_root: &Path,
@@ -958,11 +956,7 @@ fn prepare_batch(
                         .collect::<Vec<_>>();
                     chunks.push((
                         super::embeddings::summary_key(&work.path),
-                        super::embeddings::prepare_embed_text(
-                            &metadata.title,
-                            &headings,
-                            body,
-                        ),
+                        super::embeddings::prepare_embed_text(&metadata.title, &headings, body),
                     ));
                     PreparedWork::Upsert {
                         work,
@@ -1169,10 +1163,7 @@ fn refresh_status(shared: &RuntimeShared, store: &Arc<RwLock<EmbeddingStore>>) {
     let paths = current_paths(&shared.index);
     let indexed_notes = {
         let store = store.read().unwrap_or_else(|error| error.into_inner());
-        paths
-            .iter()
-            .filter(|path| store.has_note(path))
-            .count()
+        paths.iter().filter(|path| store.has_note(path)).count()
     };
     let mut state = shared
         .state
@@ -1222,10 +1213,7 @@ fn status_for_current_paths(
     }
     let indexed_notes = state.store.as_ref().map_or(0, |store| {
         let store = store.read().unwrap_or_else(|error| error.into_inner());
-        paths
-            .iter()
-            .filter(|path| store.has_note(path))
-            .count()
+        paths.iter().filter(|path| store.has_note(path)).count()
     });
     status_for_loaded_state(state, paths.len(), indexed_notes)
 }

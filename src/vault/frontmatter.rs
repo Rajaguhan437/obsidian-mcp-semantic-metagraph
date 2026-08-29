@@ -328,14 +328,20 @@ mod tests {
         // Non-mapping frontmatter degrades to an empty mapping so the note
         // stays indexed, instead of erroring and dropping the note entirely.
         let value = parse_frontmatter(content).expect("array frontmatter should degrade");
-        assert_eq!(value, Some(serde_json::Value::Object(serde_json::Map::new())));
+        assert_eq!(
+            value,
+            Some(serde_json::Value::Object(serde_json::Map::new()))
+        );
     }
 
     #[test]
     fn parse_non_mapping_yaml_scalar() {
         let content = "---\njust a string\n---\nbody";
         let value = parse_frontmatter(content).expect("scalar frontmatter should degrade");
-        assert_eq!(value, Some(serde_json::Value::Object(serde_json::Map::new())));
+        assert_eq!(
+            value,
+            Some(serde_json::Value::Object(serde_json::Map::new()))
+        );
     }
 
     // ── extract_frontmatter_tags ─────────────────────────────────────

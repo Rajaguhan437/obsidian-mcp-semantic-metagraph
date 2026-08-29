@@ -735,7 +735,7 @@ mod tests {
         assert!(index.get_note(Path::new(composed)).is_none());
     }
 
-        /// REGRESSION: a note whose frontmatter block parses to something other
+    /// REGRESSION: a note whose frontmatter block parses to something other
     /// than a YAML mapping used to abort parsing, so the note vanished from the
     /// index entirely - and therefore from the LINK GRAPH. It was absent from
     /// the link resolver, so inbound wikilinks to it were reported broken, and
@@ -778,7 +778,9 @@ mod tests {
         // it can RECEIVE links: inbound.md -> quirky.md resolves, not broken
         let backlinks = index.backlinks_to(Path::new("notes/quirky.md"));
         assert!(
-            backlinks.iter().any(|n| n.path == PathBuf::from("notes/inbound.md")),
+            backlinks
+                .iter()
+                .any(|n| n.path == PathBuf::from("notes/inbound.md")),
             "links pointing AT the note must resolve into backlinks"
         );
         let broken: Vec<_> = index
@@ -793,7 +795,10 @@ mod tests {
 
         // frontmatter degrades to an empty mapping rather than erroring
         let note = index.get_note(Path::new("notes/quirky.md")).unwrap();
-        assert!(note.frontmatter.is_some(), "frontmatter should degrade, not vanish");
+        assert!(
+            note.frontmatter.is_some(),
+            "frontmatter should degrade, not vanish"
+        );
     }
 
     #[tokio::test]

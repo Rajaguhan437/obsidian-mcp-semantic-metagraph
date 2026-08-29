@@ -223,27 +223,27 @@ fn split_point(s: &str, limit: usize) -> usize {
     let window = &s[..cap];
     let floor = cap / 2;
 
-    if let Some(p) = window.rfind("\n\n") {
-        if p > floor {
-            return p + 2;
-        }
+    if let Some(p) = window.rfind("\n\n")
+        && p > floor
+    {
+        return p + 2;
     }
     for pat in [". ", ".\n", "! ", "? ", "।"] {
-        if let Some(p) = window.rfind(pat) {
-            if p > floor {
-                return p + pat.len();
-            }
+        if let Some(p) = window.rfind(pat)
+            && p > floor
+        {
+            return p + pat.len();
         }
     }
-    if let Some(p) = window.rfind('\n') {
-        if p > floor {
-            return p + 1;
-        }
+    if let Some(p) = window.rfind('\n')
+        && p > floor
+    {
+        return p + 1;
     }
-    if let Some(p) = window.rfind(' ') {
-        if p > floor {
-            return p + 1;
-        }
+    if let Some(p) = window.rfind(' ')
+        && p > floor
+    {
+        return p + 1;
     }
     cap
 }
@@ -349,7 +349,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         let chunks = chunk_note(&body, cfg(1000, 200));
-        assert!(chunks.len() > 10, "expected many chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 10,
+            "expected many chunks, got {}",
+            chunks.len()
+        );
         // The tail must be present somewhere.
         let joined = chunks
             .iter()
@@ -361,7 +365,8 @@ mod tests {
 
     #[test]
     fn breadcrumbs_track_heading_hierarchy() {
-        let body = "# Top\nintro text here\n## Middle\ndeeper text here\n### Leaf\nleaf text here\n";
+        let body =
+            "# Top\nintro text here\n## Middle\ndeeper text here\n### Leaf\nleaf text here\n";
         let chunks = chunk_note(body, cfg(1000, 200));
         let crumbs: Vec<&str> = chunks.iter().map(|c| c.breadcrumb.as_str()).collect();
         assert!(crumbs.iter().any(|c| *c == "Top"));
@@ -406,11 +411,14 @@ mod tests {
     fn chunking_always_progresses() {
         // Overlap >= target must not loop forever.
         let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z ".repeat(50);
-        let chunks = chunk_note(&body, ChunkConfig {
-            target: 200,
-            overlap: 500,
-            packing: false,
-        });
+        let chunks = chunk_note(
+            &body,
+            ChunkConfig {
+                target: 200,
+                overlap: 500,
+                packing: false,
+            },
+        );
         assert!(!chunks.is_empty());
         assert!(chunks.len() < 10_000);
     }

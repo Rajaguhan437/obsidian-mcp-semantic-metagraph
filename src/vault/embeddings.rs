@@ -207,7 +207,6 @@ pub(crate) fn query_prefix() -> String {
     std::env::var("OBSIDIAN_EMBEDDING_QUERY_PREFIX").unwrap_or_else(|_| "query: ".to_string())
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EmbeddingBackendKind {
     Local,
@@ -1760,7 +1759,7 @@ mod tests {
         assert_eq!(results.len(), 3);
     }
 
-        // ── chunk-level store regressions ───────────────────────────────
+    // ── chunk-level store regressions ───────────────────────────────
 
     /// REGRESSION: the RUNTIME loads through load_for_space, which validates the
     /// space identity and bounds entry count by NOTE count. Chunk-level stores
@@ -1804,7 +1803,10 @@ mod tests {
         // a perfect summary match is w before rescaling, 1.0 after
         let raw = [1.0f32 * w, 0.6 * w, 0.2];
         let scaled: Vec<f32> = raw.iter().map(|s| s / w.max(1.0)).collect();
-        assert!(scaled.iter().all(|s| *s <= 1.0 + 1e-6), "must land inside [0,1]");
+        assert!(
+            scaled.iter().all(|s| *s <= 1.0 + 1e-6),
+            "must land inside [0,1]"
+        );
 
         // order is preserved - rescaling must not reorder the semantic arm
         for pair in scaled.windows(2) {
@@ -1963,8 +1965,12 @@ mod tests {
         let mut store = EmbeddingStore::new_with_identity(identity.clone());
         let note = PathBuf::from("dir/some note.md");
         let hash = prepared_text_hash("body");
-        store.insert_hashed(chunk_key(&note, 0), hash, vec![1.0, 0.0, 0.0]).unwrap();
-        store.insert_hashed(chunk_key(&note, 1), hash, vec![0.0, 1.0, 0.0]).unwrap();
+        store
+            .insert_hashed(chunk_key(&note, 0), hash, vec![1.0, 0.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&note, 1), hash, vec![0.0, 1.0, 0.0])
+            .unwrap();
         store.set_first_pass_complete(true);
         store.save(&path).unwrap();
 
@@ -2070,7 +2076,10 @@ mod tests {
         // The two arms must stay distinct and separately reportable.
         let summary_score = m.summary_score.expect("summary arm present");
         assert!(summary_score > chunk_score);
-        assert!((m.score - summary_score).abs() < 1e-6, "score is the winner");
+        assert!(
+            (m.score - summary_score).abs() < 1e-6,
+            "score is the winner"
+        );
         assert!(
             (chunk_score - 0.8).abs() < 1e-5,
             "chunk score must be the RAW cosine, unweighted: {chunk_score}"
@@ -2123,7 +2132,10 @@ mod tests {
         // summary scores 0.9, and the 1.20 weight lifts it to 1.08. That is the
         // summary arm doing its job, and it is exactly why a top hit often
         // cannot attribute itself to a passage.
-        assert_eq!(ranked[0].0, b, "the weighted summary arm outranks a 1.0 chunk");
+        assert_eq!(
+            ranked[0].0, b,
+            "the weighted summary arm outranks a 1.0 chunk"
+        );
         let top = &detailed[0].1;
         assert_eq!(top.winner, MatchedOn::Summary);
         assert!(

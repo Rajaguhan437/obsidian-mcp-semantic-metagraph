@@ -556,21 +556,24 @@ fn search_semantic_local(
     alpha: f32,
 ) -> Result<Vec<SemanticSearchResult>, VaultError> {
     let candidate_limit = semantic_candidate_limit(top_k);
-    let hits: Vec<(std::path::PathBuf, f32, Option<crate::vault::embeddings::NoteMatch>)> =
-        if lexical_prefetch {
-            vault
-                .search_hybrid(
-                    query,
-                    candidate_limit,
-                    DEFAULT_PREFETCH_COUNT.max(candidate_limit),
-                    alpha,
-                )?
-                .into_iter()
-                .map(|(path, score)| (path, score, None))
-                .collect()
-        } else {
-            vault.search_semantic_detailed(query, candidate_limit)?
-        };
+    let hits: Vec<(
+        std::path::PathBuf,
+        f32,
+        Option<crate::vault::embeddings::NoteMatch>,
+    )> = if lexical_prefetch {
+        vault
+            .search_hybrid(
+                query,
+                candidate_limit,
+                DEFAULT_PREFETCH_COUNT.max(candidate_limit),
+                alpha,
+            )?
+            .into_iter()
+            .map(|(path, score)| (path, score, None))
+            .collect()
+    } else {
+        vault.search_semantic_detailed(query, candidate_limit)?
+    };
 
     let word_re = if !include_content {
         compile_query_word_regex(query)
@@ -741,7 +744,9 @@ mod tests {
             config,
         );
         assert_eq!(found.match_type, Some("chunk"));
-        let chunk = found.best_chunk.expect("a chunk win must carry its passage");
+        let chunk = found
+            .best_chunk
+            .expect("a chunk win must carry its passage");
         assert_eq!(chunk.index, target);
         assert_eq!(
             chunk.heading_path,
