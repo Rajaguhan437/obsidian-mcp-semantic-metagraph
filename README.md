@@ -275,9 +275,15 @@ silently costs accuracy. Here the query prefix alone was worth nDCG 0.675 → 0.
 20 tools. Reference: [docs/TOOLS.md](docs/TOOLS.md).
 
 **Search** — `search_semantic` · `search_text` · `search_regex` · `search_metadata`
+
+**Relate** — `note_related` (nearest notes by meaning, each flagged linked or not)
+
 **Graph** — `wikilinks` (backlinks / outgoing / broken / orphans)
+
 **Read** — `note_read` · `note_read_many` · `note_inspect` · `frontmatter`
+
 **Write** — `note_create` · `note_write` · `note_insert` · `note_patch` · `note_move` · `note_delete`
+
 **Navigate** — `vault_list` · `vault_info` · `periodic` · `open_in_obsidian`
 
 ## Graph capabilities
