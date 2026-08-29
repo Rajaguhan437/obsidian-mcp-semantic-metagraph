@@ -420,6 +420,35 @@ Each has a regression test. Detail: [docs/FIXES.md](docs/FIXES.md).
   "embeddings"))]`, so they cannot run on Windows at all. The retrieval
   *benchmarks* were all run through `local` mode.
 
+## Why this exists
+
+It began as a smaller question: which of three embedding models to use for a
+personal Obsidian vault. Benchmarking them turned up something no model could
+fix. Retrieval embedded one vector per note from a body truncated at 400 words,
+and on that vault **170 of 416 notes were longer than that, with 73.8% of all
+text sitting past the cut**. The answers were in the notes. The index had never
+seen them.
+
+The constant carried no rationale anywhere — not in the code, not in the
+documentation, not in the commit that introduced it. Most likely a stale guard
+for a 512-token model; the tell is that it applied equally to models with 8192.
+
+Chunking fixed the deep-content case and immediately broke something else:
+typo-heavy queries got *worse* than what they replaced, 0.930 down to 0.875. The
+summary vector exists because of that regression, and the row showing it stays
+in the table.
+
+Most of what followed was learning not to trust the measurements. Two complete
+benchmark runs were silently pure BM25, because the server answers with a
+lexical-only fallback while its embedding runtime is still warming up — the tell
+was results matching a BM25 baseline to three decimal places. A configuration
+flag left on cost 0.30 nDCG and would have crowned the wrong architecture. A
+change that halved the index for free was rejected on a per-query diff that the
+aggregate had hidden.
+
+[docs/METHODOLOGY.md](docs/METHODOLOGY.md) is that list, written down. Every
+entry on it produced a wrong number here first.
+
 ## Attribution
 
 - **[lstpsche/obsidian-mcp](https://github.com/lstpsche/obsidian-mcp)** — the base
