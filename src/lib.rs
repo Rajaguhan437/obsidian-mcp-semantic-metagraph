@@ -4,7 +4,6 @@ pub mod daemon;
 pub mod error;
 pub mod models;
 pub mod tools;
-pub mod upgrade;
 pub mod vault;
 
 #[cfg(test)]
