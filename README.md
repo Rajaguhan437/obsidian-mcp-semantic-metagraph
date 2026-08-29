@@ -272,7 +272,7 @@ silently costs accuracy. Here the query prefix alone was worth nDCG 0.675 → 0.
 
 ## Tools
 
-19 tools. Reference: [docs/TOOLS.md](docs/TOOLS.md).
+20 tools. Reference: [docs/TOOLS.md](docs/TOOLS.md).
 
 **Search** — `search_semantic` · `search_text` · `search_regex` · `search_metadata`
 **Graph** — `wikilinks` (backlinks / outgoing / broken / orphans)

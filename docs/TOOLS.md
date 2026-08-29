@@ -1,6 +1,6 @@
 # Tool reference
 
-19 tools. Parameter names below are the actual schema names — several differ from
+20 tools. Parameter names below are the actual schema names — several differ from
 what you might guess, so they are listed explicitly.
 
 ## Search
@@ -75,6 +75,38 @@ Structured queries over tags and frontmatter.
   from "only broken links"
 
 Results are **not deterministically ordered**; compare order-insensitively.
+
+### `note_related`
+What else in the vault is about this note. Seeded from the note's own stored
+embedding, so it needs no query string and costs no embedding call.
+
+| param | required | notes |
+|---|---|---|
+| `path` | yes | vault-relative path of the subject note |
+| `top_k` | no | default 10, max 50 |
+| `include_passages` | no | default true; false returns a compact list without passage text |
+
+Returns the semantically nearest notes **and** the note's existing links, so the
+two can be compared:
+
+| field | notes |
+|---|---|
+| `related[]` | nearest notes, each with `score`, `match_type`, `best_chunk`, and **`linked`** |
+| `linked.outgoing` / `linked.backlinks` | what the graph already records |
+| `unlinked_related` | how many of `related` are not linked either way |
+
+**`linked: false` is the interesting case** — a note that is clearly about the
+same subject and that the vault does not connect. Ranking is the same scoring
+used by `search_semantic`, so `score` is comparable between the two tools and
+can exceed 1.0 on a weighted summary match.
+
+The seed is the note's **summary** vector (title + every heading + first 400
+words), which answers "what is this note about" rather than "what matches one of
+its paragraphs". Notes indexed with `OBSIDIAN_SUMMARY_WEIGHT=0` fall back to
+their first chunk.
+
+Requires semantic search. Errors explicitly if the subject note has no
+embeddings yet, rather than reporting that nothing is similar.
 
 ## Read
 

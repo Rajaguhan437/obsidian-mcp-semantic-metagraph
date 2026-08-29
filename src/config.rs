@@ -99,6 +99,7 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     "note_inspect",
     "frontmatter",
     "wikilinks",
+    "note_related",
     "periodic",
     "vault_info",
     "open_in_obsidian",
@@ -133,6 +134,7 @@ const PROFILE_READ: &[&str] = &[
     "note_inspect",
     "frontmatter",
     "wikilinks",
+    "note_related",
     "vault_info",
 ];
 

@@ -573,6 +573,46 @@ impl Vault {
             .collect())
     }
 
+    /// Notes semantically nearest to `path`, seeded by that note's own vector.
+    ///
+    /// Deliberately says nothing about links. "What is about the same thing" and
+    /// "what links here" are different questions with different answers, and the
+    /// interesting case is where they disagree - a note that is clearly related
+    /// and not yet linked. A caller wanting both asks both and compares.
+    #[cfg(has_embeddings)]
+    pub(crate) fn related_notes(
+        &self,
+        path: &Path,
+        top_k: usize,
+    ) -> VaultResult<Vec<(PathBuf, f32, Option<embeddings::NoteMatch>)>> {
+        let runtime = self.inner.embedding_runtime.as_ref().ok_or_else(|| {
+            VaultError::Embedding("embeddings not enabled (OBSIDIAN_EMBEDDINGS=false)".into())
+        })?;
+        let snapshot = runtime.query_snapshot()?;
+        let current_paths = self
+            .read_index()
+            .notes()
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        // Overfetch: the store can still hold vectors for notes deleted since
+        // the last reconcile, and those must not consume result slots.
+        let hits = snapshot
+            .related_to(path, top_k.saturating_mul(2).max(top_k))
+            .ok_or_else(|| {
+                VaultError::Embedding(format!(
+                    "{} has no embeddings yet (not indexed, or not in this vault)",
+                    path.display()
+                ))
+            })?;
+        Ok(hits
+            .into_iter()
+            .filter(|(candidate, _)| current_paths.contains(candidate))
+            .take(top_k)
+            .map(|(candidate, matched)| (candidate, matched.score, Some(matched)))
+            .collect())
+    }
+
     /// Experimental hybrid ranking, only reachable when OBSIDIAN_LEXICAL_WEIGHT
     /// is above zero.
     ///

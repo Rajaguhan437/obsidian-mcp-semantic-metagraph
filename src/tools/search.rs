@@ -266,7 +266,7 @@ pub struct SearchSemanticParams {
 struct SemanticSearchResult {
     path: std::path::PathBuf,
     title: String,
-    score: f32,
+    pub(crate) score: f32,
     tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snippet: Option<String>,
@@ -307,17 +307,17 @@ struct SemanticSearchResult {
 
 /// A note's best-matching passage and where it lives.
 #[derive(serde::Serialize, JsonSchema)]
-struct MatchedChunk {
+pub(crate) struct MatchedChunk {
     /// 0-based index of the passage within the note.
-    index: usize,
+    pub(crate) index: usize,
     /// Heading trail, outermost first, e.g. `["Design", "Retry policy"]`. An
     /// empty array means the passage sits above the note's first heading.
-    heading_path: Vec<String>,
+    pub(crate) heading_path: Vec<String>,
     /// The passage text, as embedded.
-    passage: String,
+    pub(crate) passage: String,
     /// This chunk's raw cosine similarity — not the note's ranking `score`,
     /// which may have come from the summary arm instead.
-    score: f32,
+    pub(crate) score: f32,
 }
 
 pub async fn search_semantic(
@@ -489,10 +489,10 @@ async fn search_semantic_daemon(
 /// and off disk, at the cost of chunking one note per result.
 #[cfg(has_embeddings)]
 #[derive(Default)]
-struct Provenance {
-    match_type: Option<&'static str>,
-    best_chunk: Option<MatchedChunk>,
-    summary_score: Option<f32>,
+pub(crate) struct Provenance {
+    pub(crate) match_type: Option<&'static str>,
+    pub(crate) best_chunk: Option<MatchedChunk>,
+    pub(crate) summary_score: Option<f32>,
 }
 
 /// Build the reportable evidence for one hit.
@@ -507,7 +507,7 @@ struct Provenance {
 /// re-read the whole note to find what it already knows. `match_type` carries
 /// the attribution, so supplying the passage is not a claim that it ranked.
 #[cfg(has_embeddings)]
-fn resolve_provenance(
+pub(crate) fn resolve_provenance(
     matched: Option<crate::vault::embeddings::NoteMatch>,
     note_text: Option<&str>,
     config: crate::vault::chunker::ChunkConfig,

@@ -6,7 +6,7 @@ index**, a **semantic index**, and a **link graph**. They are separate on purpos
 ranking.
 
 ```
-                     ┌────────────── MCP tool surface (19 tools) ──────────────┐
+                     ┌────────────── MCP tool surface (20 tools) ──────────────┐
                      │                                                          │
   search_semantic ───┤ semantic:  chunks + summary, weighted max                │
   search_text        │ lexical:   Tantivy BM25, full body, field boosts         │

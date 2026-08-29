@@ -189,6 +189,19 @@ impl EmbeddingQuerySnapshot {
         Ok(store.query_paths_detailed(&query_vector, allowed_paths, top_k))
     }
 
+    /// Notes semantically nearest to `note`, seeded from its own stored vector.
+    ///
+    /// No embedding call and no query string: the seed is already indexed.
+    /// `None` means the note has no vectors yet.
+    pub(crate) fn related_to(
+        &self,
+        note: &Path,
+        top_k: usize,
+    ) -> Option<Vec<(PathBuf, super::embeddings::NoteMatch)>> {
+        let store = self.store.read().unwrap_or_else(|error| error.into_inner());
+        store.related_to(note, top_k)
+    }
+
     /// Semantic score for one note: the best of its chunks, versus its summary
     /// scaled by `OBSIDIAN_SUMMARY_WEIGHT`.
     ///

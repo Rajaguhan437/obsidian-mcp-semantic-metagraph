@@ -601,6 +601,40 @@ impl EmbeddingStore {
             .collect()
     }
 
+    /// Notes most similar to `note`, seeded by that note's own stored vector.
+    ///
+    /// The seed is the note's SUMMARY vector - the note-level representation the
+    /// architecture already defines (title + every heading + the first 400
+    /// words). That answers "what else is about what this note is about" rather
+    /// than "what matches one paragraph of it", which is what seeding from a
+    /// single chunk would give. Falls back to the first chunk, then a legacy
+    /// whole-note entry, for notes indexed without a summary arm
+    /// (`OBSIDIAN_SUMMARY_WEIGHT=0`).
+    ///
+    /// Candidates are scored by exactly the same collapse a query uses, so a
+    /// `NoteMatch` means here what it means in search. Costs no embedding call:
+    /// the seed is already in the store.
+    ///
+    /// Returns `None` when the note has no vectors at all - not yet indexed, or
+    /// not in the vault.
+    pub(crate) fn related_to(
+        &self,
+        note: &Path,
+        top_k: usize,
+    ) -> Option<Vec<(PathBuf, NoteMatch)>> {
+        let seed = self
+            .embeddings
+            .get(&summary_key(note))
+            .or_else(|| self.embeddings.get(&chunk_key(note, 0)))
+            .or_else(|| self.embeddings.get(note))?
+            .vector
+            .clone();
+        let mut scored = self.collapse_to_notes(&seed, None);
+        // A note is always its own nearest neighbour; that is not a finding.
+        scored.retain(|(candidate, _)| candidate.as_path() != note);
+        Some(Self::rank_detailed(scored, top_k))
+    }
+
     pub(crate) fn query_paths(
         &self,
         query_vec: &[f32],
@@ -2143,6 +2177,78 @@ mod tests {
             "and it still reports b's best chunk as evidence"
         );
         assert!(ranked[1].0 == a && ranked[2].0 == c);
+    }
+
+    /// Seeding from a note's own vector must never return that note. It is
+    /// always its own nearest neighbour, which is not a finding.
+    #[test]
+    fn related_to_excludes_the_note_itself_and_ranks_by_similarity() {
+        let mut store = EmbeddingStore::new(3);
+        let seed = PathBuf::from("seed.md");
+        let near = PathBuf::from("near.md");
+        let far = PathBuf::from("far.md");
+
+        // The seed's SUMMARY is what gets used, not its chunk - so a candidate
+        // matching the summary must win even though the seed's own chunk points
+        // somewhere else entirely.
+        store
+            .insert_hashed(summary_key(&seed), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&seed, 0), [0u8; 32], vec![0.0, 1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&near, 0), [0u8; 32], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&far, 0), [0u8; 32], vec![0.0, 0.0, 1.0])
+            .unwrap();
+
+        let hits = store.related_to(&seed, 10).expect("seed is indexed");
+        let paths: Vec<&PathBuf> = hits.iter().map(|(p, _)| p).collect();
+        assert!(
+            !paths.contains(&&seed),
+            "a note must not be its own relative"
+        );
+        assert_eq!(paths.first().copied(), Some(&near), "got {paths:?}");
+        assert!(hits.windows(2).all(|w| w[0].1.score >= w[1].1.score));
+    }
+
+    /// A note indexed without a summary arm (OBSIDIAN_SUMMARY_WEIGHT=0) still
+    /// has to be seedable, or the tool would fail on exactly the configuration
+    /// that produces the most chunk-attributable results.
+    #[test]
+    fn related_to_falls_back_to_the_first_chunk_without_a_summary() {
+        let mut store = EmbeddingStore::new(2);
+        let seed = PathBuf::from("chunks-only.md");
+        let other = PathBuf::from("other.md");
+        store
+            .insert_hashed(chunk_key(&seed, 0), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+        store
+            .insert_hashed(chunk_key(&other, 0), [0u8; 32], vec![1.0, 0.0])
+            .unwrap();
+
+        let hits = store
+            .related_to(&seed, 10)
+            .expect("chunk 0 is a valid seed");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, other);
+    }
+
+    /// An unindexed note must be distinguishable from one with no relatives, so
+    /// the tool can say "not indexed yet" instead of "nothing is similar".
+    #[test]
+    fn related_to_is_none_for_a_note_with_no_vectors() {
+        let mut store = EmbeddingStore::new(2);
+        store
+            .insert_hashed(
+                chunk_key(&PathBuf::from("a.md"), 0),
+                [0u8; 32],
+                vec![1.0, 0.0],
+            )
+            .unwrap();
+        assert!(store.related_to(&PathBuf::from("absent.md"), 5).is_none());
     }
 
     /// A chunk key must resolve back to its index, and a summary key must not

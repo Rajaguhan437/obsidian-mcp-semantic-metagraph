@@ -948,10 +948,14 @@ mod tool_filtering {
     }
 
     #[tokio::test]
-    async fn read_profile_exposes_11_tools() {
+    async fn read_profile_exposes_12_tools() {
         let (_tmp, server) = build_server(ToolFilter::Profile("read".into())).await;
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 11, "read profile should expose 11 tools");
+        assert_eq!(tools.len(), 12, "read profile should expose 12 tools");
+        assert!(
+            server.tool_router.has_route("note_related"),
+            "note_related is read-only and belongs in this profile"
+        );
 
         assert!(server.tool_router.has_route("note_read"));
         assert!(server.tool_router.has_route("note_read_many"));

@@ -5,6 +5,7 @@ pub mod metadata;
 pub mod navigation;
 pub mod notes;
 pub mod periodic;
+pub mod related;
 pub mod search;
 pub mod utility;
 
@@ -305,6 +306,17 @@ impl ObsidianMcp {
         Parameters(params): Parameters<graph::WikilinksParams>,
     ) -> Result<CallToolResult, ErrorData> {
         graph::wikilinks(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_related",
+        description = "Find notes about the same subject as a given note, seeded from that note's own embedding (no query string needed). Returns semantically nearest notes ranked by similarity, each flagged with whether it is ALREADY linked to the subject note, plus the note's existing outgoing links and backlinks for comparison. An unlinked high-scoring result is a connection the vault has not recorded yet. Requires semantic search to be enabled."
+    )]
+    async fn note_related(
+        &self,
+        Parameters(params): Parameters<related::NoteRelatedParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        related::note_related(&self.vault, params).await
     }
 
     // ── Periodic Notes ──────────────────────────────────────────────
