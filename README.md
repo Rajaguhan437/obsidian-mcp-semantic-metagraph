@@ -52,6 +52,18 @@ path.](docs/images/architecture.png)
 
 ---
 
+**Start here** — [Install](#install) · [Configuration](#configuration) · [Tools](#tools)
+
+**How it works** — [What an agent gets](#what-it-gives-an-agent) · [Retrieval architecture](#retrieval-architecture) · [Provenance](#retrieval-provenance) · [Graph](#graph-capabilities)
+
+**Why it is built this way** — [Hybrid ranking is off](#why-hybrid-ranking-is-off-by-default) · [The daemon is kept](#why-the-daemon-is-retained)
+
+**Evidence** — [Benchmarks](#benchmark-results) · [Fixes over upstream](#significant-fixes-over-upstream) · [Known limitations](#known-limitations)
+
+**Context** — [Why this exists](#why-this-exists) · [Attribution](#attribution) · [All documentation](#documentation)
+
+---
+
 ## What it gives an agent
 
 Four capabilities, deliberately kept separate rather than merged behind one
