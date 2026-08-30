@@ -294,7 +294,7 @@ that.
 
 | variable | default | options / notes |
 |---|---|---|
-| `OBSIDIAN_SEMANTIC_MODE` | `auto` | `auto` \| `local` \| `daemon`. `auto` uses the daemon when one is reachable and falls back in-process. `local` never uses it — **required if you want provenance on `search_semantic`**, see [Retrieval provenance](#retrieval-provenance). `daemon` refuses to fall back. |
+| `OBSIDIAN_SEMANTIC_MODE` | `auto` | `auto` \| `local` \| `daemon`. `auto` uses the daemon when one is reachable and falls back in-process; `local` never uses it; `daemon` refuses to fall back. All three report [retrieval provenance](#retrieval-provenance) identically — the daemon carries it over IPC. |
 | `OBSIDIAN_SEMANTIC_MODEL` | `BAAI/bge-small-en-v1.5` | Identity label the daemon records and matches against. It does **not** select the API model — that is `OBSIDIAN_EMBEDDING_API_MODEL`. A client whose label differs is refused, which is what stops two models sharing one index. |
 | `OBSIDIAN_SEMANTIC_PREFETCH` | `50` | Candidates fetched before filtering. Clamped to `[1, 1000]`. |
 | `OBSIDIAN_SEMANTIC_HOME` | `%APPDATA%/obsidian-semantic`, `$XDG_STATE_HOME/obsidian-semantic` | Where the daemon keeps manifests, sockets and per-vault indexes. |
