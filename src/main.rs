@@ -103,6 +103,11 @@ async fn serve_http(
     // closure takes ownership of `server_disabled`.
     let dashboard_base = dashboard_static_json(config, &server_disabled);
     let dashboard_vault = vault.clone();
+    // The daemon holds its own index of the same vault. Reporting both counts
+    // is what makes a disagreement between them visible.
+    let dashboard_daemon = semantic_runtime.daemon_client.clone();
+    let dashboard_vault_path = config.vault_path.clone();
+    let dashboard_watch = config.watch;
     let mcp_service: StreamableHttpService<ObsidianMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -131,7 +136,15 @@ async fn serve_http(
         .route("/health", get(move || health_handler(health_vault.clone())))
         .route(
             "/api/info",
-            get(move || info_handler(dashboard_vault.clone(), dashboard_base.clone())),
+            get(move || {
+                info_handler(
+                    dashboard_vault.clone(),
+                    dashboard_base.clone(),
+                    dashboard_daemon.clone(),
+                    dashboard_vault_path.clone(),
+                    dashboard_watch,
+                )
+            }),
         )
         .route("/dashboard", get(dashboard_page))
         .merge(mcp_router);
@@ -252,8 +265,14 @@ fn dashboard_static_json(config: &Config, disabled: &HashSet<String>) -> serde_j
     })
 }
 
-/// `/api/info` — the static snapshot plus live vault and index counters.
-async fn info_handler(vault: Vault, base: serde_json::Value) -> axum::Json<serde_json::Value> {
+/// `/api/info` — the static snapshot plus live vault, index and daemon state.
+async fn info_handler(
+    vault: Vault,
+    base: serde_json::Value,
+    daemon: Option<SemanticDaemonClient>,
+    vault_path: std::path::PathBuf,
+    watch: bool,
+) -> axum::Json<serde_json::Value> {
     let mut resp = base;
 
     if let Ok(stats) = vault.vault_stats() {
@@ -287,7 +306,82 @@ async fn info_handler(vault: Vault, base: serde_json::Value) -> axum::Json<serde
         }
     }
 
+    resp["daemon"] = daemon_json(daemon, &vault_path, watch, &resp).await;
+
     axum::Json(resp)
+}
+
+/// What the semantic daemon believes about this vault, and whether that agrees
+/// with the server.
+///
+/// The daemon keeps its own index. When the two were configured differently
+/// they disagreed silently — the server indexed 476 notes and the daemon 507,
+/// which surfaced only as semantic results from folders the user had excluded.
+/// Neither number is wrong alone; only the pair reveals the problem, so both
+/// are reported here with the comparison already made.
+async fn daemon_json(
+    daemon: Option<SemanticDaemonClient>,
+    vault_path: &std::path::Path,
+    watch: bool,
+    server: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(client) = daemon else {
+        return serde_json::json!({
+            "in_use": false,
+            "reason": "no daemon client configured (OBSIDIAN_SEMANTIC_MODE=local, or the daemon is unavailable)",
+        });
+    };
+
+    // `ensure_vault` is idempotent and returns the existing context, so this is
+    // a status read rather than a mutation.
+    let status = match client.ensure_vault(vault_path, watch, None).await {
+        Ok(status) => status,
+        Err(err) => {
+            return serde_json::json!({
+                "in_use": false,
+                "reason": format!("daemon unreachable: {err}"),
+            });
+        }
+    };
+
+    let server_notes = server["vault"]["total_notes"].as_u64();
+    let daemon_notes = status.total_notes.map(|n| n as u64);
+    let agrees = match (server_notes, daemon_notes) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    };
+
+    let mut out = serde_json::json!({
+        "in_use": true,
+        "vault_id": status.vault_id,
+        "model_name": status.model_name,
+        "ready": status.ready,
+        "watch_enabled": status.watch_enabled,
+        "indexed_notes": status.indexed_notes,
+        "total_notes": status.total_notes,
+        "pending_notes": status.pending_notes,
+        // The field worth looking at: false means the daemon and the server
+        // disagree about which notes exist, which is a configuration fault
+        // rather than a retrieval one.
+        "agrees_with_server": agrees,
+    });
+
+    if let Some(phase) = status.phase {
+        out["phase"] = serde_json::json!(phase);
+    }
+    if let Some(error) = status.last_error {
+        out["error"] = serde_json::json!(error);
+    }
+    if agrees == Some(false) {
+        out["disagreement"] = serde_json::json!(format!(
+            "server indexes {} notes, daemon indexes {} — check OBSIDIAN_EXCLUDE_PATHS \
+             reaches both, and restart the server so it respawns the daemon",
+            server_notes.unwrap_or(0),
+            daemon_notes.unwrap_or(0),
+        ));
+    }
+
+    out
 }
 
 /// `/dashboard` — a single self-contained page rendering `/api/info`.

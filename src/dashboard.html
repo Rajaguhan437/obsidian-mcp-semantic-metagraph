@@ -88,6 +88,13 @@
     border: 1px solid var(--err); color: var(--err);
     padding: .7rem .9rem; border-radius: 8px; margin-bottom: 1rem; font-size: .86rem;
   }
+  /* Shown only when the server and the daemon disagree about the vault. That
+     used to be invisible, so it is deliberately loud rather than a table cell. */
+  .warn-banner {
+    display: none; background: color-mix(in srgb, var(--warn) 12%, transparent);
+    border: 1px solid var(--warn); color: var(--warn);
+    padding: .7rem .9rem; border-radius: 8px; margin-top: 1rem; font-size: .86rem;
+  }
 </style>
 </head>
 <body>
@@ -114,10 +121,16 @@
       <dl id="vault"></dl>
     </div>
     <div class="card">
+      <h2>Semantic daemon</h2>
+      <dl id="daemon"></dl>
+    </div>
+    <div class="card">
       <h2>Server</h2>
       <dl id="cfg"></dl>
     </div>
   </div>
+
+  <div id="disagree" class="warn-banner"></div>
 
   <section class="tools">
     <h2>Tools <span id="tcount" class="ver"></span></h2>
@@ -212,6 +225,37 @@ function render(d) {
     ["tools hidden", dis.length ? dis.length : "0"],
     ["exclusions", ex.length ? ex.map(p => `<code>${esc(p)}</code>`).join(" ") : "none"],
   ]);
+
+  // ── daemon ──
+  // Both note counts sit next to each other on purpose: neither is wrong on its
+  // own, and only the comparison shows a misconfiguration.
+  const dm = d.daemon || {};
+  if (!dm.in_use) {
+    rows($("daemon"), [
+      ["status", pill("not in use", "warn")],
+      ["reason", esc(dm.reason || "unknown")],
+    ]);
+  } else {
+    const agrees = dm.agrees_with_server;
+    rows($("daemon"), [
+      ["status", dm.ready ? pill(dm.phase || "ready", "ok") : pill(dm.phase || "warming", "warn")],
+      ["indexed", dm.total_notes != null ? `${dm.indexed_notes ?? "?"} / ${dm.total_notes}` : "—"],
+      ["pending", dm.pending_notes ?? "—"],
+      ["model", esc(dm.model_name || "—")],
+      ["watcher", dm.watch_enabled ? pill("on", "ok") : pill("off", "warn")],
+      ["agrees with server", agrees === true ? pill("yes", "ok")
+        : agrees === false ? pill("NO", "err") : pill("unknown", "warn")],
+      ...(dm.error ? [["error", `<span style="color:var(--err)">${esc(dm.error)}</span>`]] : []),
+    ]);
+  }
+
+  const banner = $("disagree");
+  if (dm.disagreement) {
+    banner.innerHTML = `<strong>Server and daemon disagree about this vault.</strong> ${esc(dm.disagreement)}`;
+    banner.style.display = "block";
+  } else {
+    banner.style.display = "none";
+  }
 
   // ── tools ──
   const tools = d.tools || [];

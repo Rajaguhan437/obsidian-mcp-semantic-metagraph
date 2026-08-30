@@ -388,11 +388,31 @@ merely asked for. When a tool filter is active, hidden tools are absent here too
 | endpoint | purpose |
 |---|---|
 | `/dashboard` | the page |
-| `/api/info` | the same data as JSON — config, index state, tool schemas |
+| `/api/info` | the same data as JSON — config, index state, daemon state, tool schemas |
 | `/health` | liveness plus index readiness, for scripts |
 
 `embeddings_ready` is the field worth gating on: a warming index still answers,
 and that is the one failure mode that resembles success.
+
+**It also reports what the *daemon* believes.** The daemon keeps its own index of
+the same vault, and when the two were configured differently they disagreed in
+silence — the server indexed 476 notes, the daemon 507, and the only symptom was
+semantic results from folders that had been excluded. Neither number is wrong on
+its own; only the pair shows the fault. So `/api/info` carries both and states
+the comparison outright:
+
+```jsonc
+"daemon": {
+  "in_use": true,
+  "total_notes": 476,
+  "indexed_notes": 471,
+  "model_name": "snowflake-arctic-embed2:latest",
+  "agrees_with_server": true      // false ⇒ a configuration fault, not a retrieval one
+}
+```
+
+When it is `false` the page shows a banner naming both counts, rather than
+leaving the disagreement to be inferred from an odd search result.
 
 ## Tools
 
