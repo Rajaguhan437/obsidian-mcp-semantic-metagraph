@@ -214,6 +214,24 @@ pub struct SearchResult {
     pub results: Vec<SemanticHit>,
 }
 
+/// A note's best-matching passage, carried alongside a semantic hit.
+///
+/// Mirrors the `best_chunk` the in-process path returns, so a daemon-served
+/// query and a locally-served one describe a result the same way.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct SemanticChunk {
+    /// 0-based index of the passage within the note.
+    pub index: usize,
+    /// Heading trail, outermost first. Empty means the passage sits above the
+    /// note's first heading.
+    pub heading_path: Vec<String>,
+    /// The passage text, as embedded.
+    pub passage: String,
+    /// This chunk's raw cosine similarity — not the note's ranking `score`,
+    /// which may have come from the summary arm instead.
+    pub score: f32,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SemanticHit {
     pub path: String,
@@ -226,11 +244,100 @@ pub struct SemanticHit {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subpath: Option<String>,
+    /// Which representation produced `score`: `"chunk"`, `"summary"` or
+    /// `"note"`. Absent when the rank is not attributable to one — the hybrid
+    /// path blends two, and an older daemon does not report it at all.
+    ///
+    /// These three fields are additive and default to `None`, so a new client
+    /// talking to an old daemon simply sees no provenance, exactly as before.
+    /// `SemanticHit` does not deny unknown fields, so the reverse also holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
+    /// The note's closest passage, supplied whenever the note has chunks —
+    /// including when `match_type` is `"summary"`, where it is evidence rather
+    /// than cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_chunk: Option<SemanticChunk>,
+    /// The weighted summary-arm score, for comparison against
+    /// `best_chunk.score`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_score: Option<f32>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon that predates provenance omits the three fields entirely. That
+    /// has to keep deserializing, or upgrading the client would break every
+    /// query against an older daemon rather than merely losing provenance.
+    #[test]
+    fn semantic_hit_from_a_daemon_without_provenance_still_parses() {
+        let hit: SemanticHit =
+            serde_json::from_str(r#"{"path":"a.md","title":"A","score":0.5,"tags":[]}"#)
+                .expect("a pre-provenance hit must still deserialize");
+
+        assert_eq!(hit.match_type, None);
+        assert_eq!(hit.best_chunk, None);
+        assert_eq!(hit.summary_score, None);
+    }
+
+    /// And the fields must survive a full round trip when they are present,
+    /// since the whole point is that a daemon-served result now describes
+    /// itself the same way an in-process one does.
+    #[test]
+    fn semantic_hit_round_trips_provenance() {
+        let hit = SemanticHit {
+            path: "a.md".into(),
+            title: "A".into(),
+            score: 0.9,
+            tags: vec![],
+            snippet: None,
+            content: None,
+            subpath: None,
+            match_type: Some("summary".into()),
+            best_chunk: Some(SemanticChunk {
+                index: 3,
+                heading_path: vec!["Design".into(), "Retry policy".into()],
+                passage: "after testing we settled on five attempts".into(),
+                score: 0.62,
+            }),
+            summary_score: Some(0.9),
+        };
+
+        let wire = serde_json::to_string(&hit).expect("serialize");
+        let back: SemanticHit = serde_json::from_str(&wire).expect("deserialize");
+
+        assert_eq!(back.match_type.as_deref(), Some("summary"));
+        assert_eq!(back.summary_score, Some(0.9));
+        let chunk = back.best_chunk.expect("best_chunk survives the round trip");
+        assert_eq!(chunk.index, 3);
+        assert_eq!(chunk.heading_path, ["Design", "Retry policy"]);
+    }
+
+    /// Omitted rather than serialized as null, so an older client that does not
+    /// know these fields sees exactly the payload it always saw.
+    #[test]
+    fn absent_provenance_is_omitted_from_the_wire() {
+        let hit = SemanticHit {
+            path: "a.md".into(),
+            title: "A".into(),
+            score: 0.9,
+            tags: vec![],
+            snippet: None,
+            content: None,
+            subpath: None,
+            match_type: None,
+            best_chunk: None,
+            summary_score: None,
+        };
+
+        let wire = serde_json::to_string(&hit).expect("serialize");
+
+        assert!(!wire.contains("match_type"), "wire: {wire}");
+        assert!(!wire.contains("best_chunk"), "wire: {wire}");
+        assert!(!wire.contains("summary_score"), "wire: {wire}");
+    }
 
     #[test]
     fn request_defaults_params_to_object() {

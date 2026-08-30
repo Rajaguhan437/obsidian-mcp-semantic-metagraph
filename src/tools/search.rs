@@ -382,6 +382,27 @@ pub(crate) struct MatchedChunk {
     pub(crate) score: f32,
 }
 
+/// Narrow a daemon-supplied `match_type` to the vocabulary this API publishes.
+///
+/// `SemanticSearchResult::match_type` is a `&'static str` so the output schema
+/// can enumerate it. An unrecognised label — a newer daemon, say — is dropped
+/// rather than passed through: a client is better served by "unknown" than by a
+/// value its schema does not list.
+///
+/// Deliberately not gated on `has_embeddings`: the daemon transport is compiled
+/// either way, since talking to a daemon needs no local embedding backend.
+fn match_type_label(raw: Option<&str>) -> Option<&'static str> {
+    match raw? {
+        "chunk" => Some("chunk"),
+        "summary" => Some("summary"),
+        "note" => Some("note"),
+        other => {
+            tracing::warn!(match_type = other, "daemon reported an unknown match_type");
+            None
+        }
+    }
+}
+
 pub async fn search_semantic(
     vault: &Vault,
     params: SearchSemanticParams,
@@ -533,12 +554,16 @@ async fn search_semantic_daemon(
                 tags: hit.tags,
                 snippet: hit.snippet,
                 content: hit.content,
-                // The daemon IPC protocol carries note-level hits only, so
-                // passage provenance is unavailable in `daemon` mode. The
-                // fields are omitted rather than guessed.
-                match_type: None,
-                best_chunk: None,
-                summary_score: None,
+                // A daemon too old to report provenance simply omits these,
+                // leaving them `None` exactly as before.
+                match_type: match_type_label(hit.match_type.as_deref()),
+                best_chunk: hit.best_chunk.map(|chunk| MatchedChunk {
+                    index: chunk.index,
+                    heading_path: chunk.heading_path,
+                    passage: chunk.passage,
+                    score: chunk.score,
+                }),
+                summary_score: hit.summary_score,
             })
         })
         .take(top_k)

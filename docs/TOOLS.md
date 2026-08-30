@@ -29,7 +29,7 @@ The tools are deliberately narrow, so picking the right one is most of using the
 
 When `match_type` is `"summary"`, `best_chunk` is **not** the reason the note was found. Quote it as context, never as the cause.
 
-> Both fields are **absent** when the semantic daemon answers a `search_semantic` query — the default whenever a daemon is running — because its IPC protocol carries note-level hits only. Absence means *unknown*, not `"chunk"`. `note_related` is always answered in-process and always reports provenance; set `OBSIDIAN_SEMANTIC_MODE=local` if you need it from `search_semantic` too.
+> Both fields are present however the query was served — in-process or by the semantic daemon. They are omitted only on the hybrid path (`lexical_prefetch: true`), where a blended rank is not attributable to one representation. **Absence means *unknown*, never `"chunk"`** — branch on `match_type` being present, not on whether a passage came back.
 
 ## Profiles
 
@@ -48,7 +48,7 @@ No tool mixes reading and writing, which is what makes `read` trustworthy: the f
 
 ### `search_semantic`
 
-Find notes by meaning rather than wording. Use this when you have a question or an idea and do not know which words the note actually uses; use search_text instead when you know the terms that appear in it. Returns `{ results: [...] }`, ranked most similar first, each hit carrying a snippet. When the query is answered in-process, hits also carry provenance: `match_type` says WHY the note ranked — "chunk" (one specific passage matched) or "summary" (the note's overall gist matched) — and `best_chunk` gives the closest passage with its `heading_path`. On a "summary" match that passage did NOT cause the ranking, so do not cite it as the reason the note was found. Those three fields are ABSENT whenever the semantic daemon answers instead, which is the default while a daemon is running, because its protocol carries note-level hits only: read their absence as "unknown", never as "chunk". note_related always reports provenance, being answered in-process. Requires semantic search to be enabled; while the index is still building this returns an explicit "warming" error with progress rather than degrading silently.
+Find notes by meaning rather than wording. Use this when you have a question or an idea and do not know which words the note actually uses; use search_text instead when you know the terms that appear in it. Returns `{ results: [...] }`, ranked most similar first. Each hit carries a snippet plus its provenance: `match_type` says WHY the note ranked — "chunk" (one specific passage matched) or "summary" (the note's overall gist matched) — and `best_chunk` gives the closest passage with its `heading_path` and its own score. On a "summary" match that passage did NOT cause the ranking, so cite it as context, never as the reason the note was found. Provenance is omitted only when you pass lexical_prefetch:true, where a blended rank is not attributable to one representation: treat missing `match_type` as "unknown", never as "chunk". Requires semantic search to be enabled; while the index is still building this returns an explicit "warming" error with progress rather than degrading silently.
 
 *Profiles: `read`*
 

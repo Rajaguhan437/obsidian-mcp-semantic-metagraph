@@ -81,10 +81,68 @@ pub async fn search_semantic(
     let top_k = params.top_k.unwrap_or(DEFAULT_TOP_K);
     let include_content = params.include_content.unwrap_or(false);
 
-    let scores = context
-        .search_semantic_scores(&params.query, top_k)
-        .map_err(map_vault_error)?;
-    build_hits(&context, scores, &params.query, include_content)
+    // With embeddings compiled in, ask for the detailed form so each hit can
+    // say which representation ranked it. Without them `require_semantic_ready`
+    // has already returned an error above; the branch exists only to compile.
+    #[cfg(has_embeddings)]
+    {
+        let hits = context
+            .search_semantic_hits(&params.query, top_k)
+            .map_err(map_vault_error)?;
+
+        let matches: std::collections::HashMap<PathBuf, _> = hits
+            .iter()
+            .map(|(path, matched)| (path.clone(), *matched))
+            .collect();
+        let scores: Vec<(PathBuf, f32)> = hits
+            .into_iter()
+            .map(|(path, matched)| (path, matched.score))
+            .collect();
+
+        let chunk_config = crate::vault::chunker::ChunkConfig::from_env();
+        build_hits(
+            &context,
+            scores,
+            &params.query,
+            include_content,
+            |path, text| resolve_hit_provenance(matches.get(path).copied(), text, chunk_config),
+        )
+    }
+
+    #[cfg(not(has_embeddings))]
+    {
+        let scores = context
+            .search_semantic_scores(&params.query, top_k)
+            .map_err(map_vault_error)?;
+        build_hits(&context, scores, &params.query, include_content, |_, _| {
+            HitProvenance::default()
+        })
+    }
+}
+
+/// Map the store's `NoteMatch` onto the wire fields.
+///
+/// Reuses `tools::search::resolve_provenance` so the daemon and the in-process
+/// path cannot drift on what counts as a chunk win, which passage is reported,
+/// or how a summary win is labelled.
+#[cfg(has_embeddings)]
+fn resolve_hit_provenance(
+    matched: Option<crate::vault::embeddings::NoteMatch>,
+    text: Option<&str>,
+    chunk_config: crate::vault::chunker::ChunkConfig,
+) -> HitProvenance {
+    let provenance = crate::tools::search::resolve_provenance(matched, text, chunk_config);
+
+    HitProvenance {
+        match_type: provenance.match_type.map(str::to_string),
+        best_chunk: provenance.best_chunk.map(|chunk| protocol::SemanticChunk {
+            index: chunk.index,
+            heading_path: chunk.heading_path,
+            passage: chunk.passage,
+            score: chunk.score,
+        }),
+        summary_score: provenance.summary_score,
+    }
 }
 
 pub async fn search_hybrid(
@@ -117,7 +175,15 @@ pub async fn search_hybrid(
         .search_hybrid_scores(&params.query, &bm25_hits, alpha, top_k)
         .map_err(map_vault_error)?;
 
-    build_hits(&context, combined, &params.query, include_content)
+    // No provenance on the hybrid path: a blended rank is not attributable to
+    // one representation, so the fields are omitted rather than guessed.
+    build_hits(
+        &context,
+        combined,
+        &params.query,
+        include_content,
+        |_, _| HitProvenance::default(),
+    )
 }
 
 pub async fn open_hint(
@@ -171,12 +237,30 @@ async fn require_context(
     }
 }
 
-fn build_hits(
+/// The provenance fields of one hit, as they go on the wire.
+#[derive(Default)]
+struct HitProvenance {
+    match_type: Option<String>,
+    best_chunk: Option<protocol::SemanticChunk>,
+    summary_score: Option<f32>,
+}
+
+/// Resolve provenance for a note, given its text.
+///
+/// Taken as a callback rather than a flag so the hybrid path — where a blended
+/// rank is not attributable to one representation — and a daemon built without
+/// embeddings can both pass a resolver that yields nothing, without this
+/// function needing to know why.
+fn build_hits<F>(
     context: &VaultContext,
     scores: Vec<(PathBuf, f32)>,
     query: &str,
     include_content: bool,
-) -> QueryResult<SearchResult> {
+    mut provenance_for: F,
+) -> QueryResult<SearchResult>
+where
+    F: FnMut(&Path, Option<&str>) -> HitProvenance,
+{
     let word_re = if include_content {
         None
     } else {
@@ -191,11 +275,16 @@ fn build_hits(
         let title = meta.title;
         let tags = meta.tags;
 
+        // Read once: the passage lookup needs the text whether or not the
+        // caller asked for content.
+        let text = context.read_note(&path).ok();
+        let provenance = provenance_for(&path, text.as_deref());
+
         let (content, snippet) = if include_content {
-            (context.read_note(&path).ok(), None)
+            (text, None)
         } else {
-            let snippet = context.read_note(&path).ok().map(|text| {
-                let body = crate::vault::frontmatter::get_body(&text);
+            let snippet = text.as_deref().map(|text| {
+                let body = crate::vault::frontmatter::get_body(text);
                 if let Some(re) = word_re.as_ref()
                     && let Some(matched) = re.find(body)
                 {
@@ -207,7 +296,7 @@ fn build_hits(
                     );
                     return context_text;
                 }
-                body_preview(&text, SNIPPET_FALLBACK_CHARS)
+                body_preview(text, SNIPPET_FALLBACK_CHARS)
             });
             (None, snippet)
         };
@@ -220,6 +309,9 @@ fn build_hits(
             snippet,
             content,
             subpath: None,
+            match_type: provenance.match_type,
+            best_chunk: provenance.best_chunk,
+            summary_score: provenance.summary_score,
         });
     }
 

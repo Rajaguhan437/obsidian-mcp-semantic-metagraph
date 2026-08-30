@@ -176,10 +176,21 @@ most hits become chunk-attributable, but casual/typo retrieval drops from .975 t
 **Cost.** Roughly +117% response bytes at `top_k=5` without content (1,764 →
 3,836 bytes, ~518 tokens), median 206 bytes of evidence per result.
 
-**Not available** in `daemon` mode, whose IPC protocol carries note-level hits
-only, or on the experimental hybrid path, where a blended rank is not
-attributable to a single representation. Both omit the fields rather than
-guessing.
+**Available on every path except hybrid.** The daemon reports provenance too:
+its IPC protocol used to carry note-level hits only, so a daemon-served
+`search_semantic` silently returned none of these fields while the in-process
+path returned them in full — the store had the information and nothing asked for
+it. It now travels over the wire, resolved by the same code both sides, so a
+result describes itself identically however it was served.
+
+The exception is the experimental hybrid path, where a blended rank is not
+attributable to a single representation. It omits the fields rather than
+guessing, and **absence means "unknown", never `"chunk"`** — branch on
+`match_type` being present, not on whether a passage came back.
+
+The three fields are additive on the wire and default to absent, so a client
+built against this version still works with a daemon that predates it; it simply
+sees no provenance, as before.
 
 ## Install
 
@@ -241,34 +252,123 @@ are near-instant.
 
 ### Embeddings
 
-| variable | default | notes |
+| variable | default | options / notes |
 |---|---|---|
-| `OBSIDIAN_EMBEDDINGS` | `false` | Master switch for semantic search. |
-| `OBSIDIAN_EMBEDDING_PROVIDER` | inferred | `local` (fastembed) or `api`. |
-| `OBSIDIAN_EMBEDDING_API_BASE` | OpenAI | Any OpenAI-compatible `/v1` endpoint. |
-| `OBSIDIAN_EMBEDDING_API_MODEL` | — | Model name at that endpoint. |
-| `OBSIDIAN_EMBEDDING_API_KEY` | — | Falls back to `OPENAI_API_KEY`. |
-| `OBSIDIAN_EMBEDDING_DIM` | probed | Set explicitly to skip a probe request. |
+| `OBSIDIAN_EMBEDDINGS` | `false` | `true` \| `false`. Runtime switch for semantic search. **The compile-time half is separate**: build with `--features embeddings` or `embeddings-api`, or this does nothing. |
+| `OBSIDIAN_EMBEDDING_PROVIDER` | inferred from features | `local` (fastembed, in-process ONNX) \| `api` (any OpenAI-compatible endpoint). |
+| `OBSIDIAN_EMBEDDINGS_MODEL` | `BAAI/bge-small-en-v1.5` | HuggingFace model for the **local** provider. Ignored by the API provider, which uses `OBSIDIAN_EMBEDDING_API_MODEL`. |
+| `OBSIDIAN_EMBEDDING_API_BASE` | `https://api.openai.com/v1` | Any OpenAI-compatible `/v1` endpoint — Ollama is `http://localhost:11434/v1`. Falls back to `OPENAI_BASE_URL`. |
+| `OBSIDIAN_EMBEDDING_API_MODEL` | — | Model name at that endpoint. Falls back to `OPENAI_MODEL`. |
+| `OBSIDIAN_EMBEDDING_API_KEY` | — | **Required** for the API provider, even when the endpoint ignores it (Ollama accepts any value). Falls back to `OPENAI_API_KEY`. |
+| `OBSIDIAN_EMBEDDING_DIM` | probed at startup | Set explicitly to skip the probe request. Must be > 0. |
 | `OBSIDIAN_EMBEDDING_QUERY_PREFIX` | `"query: "` | **Set both empty for prefix-free models such as bge-m3.** |
-| `OBSIDIAN_EMBEDDING_DOC_PREFIX` | `"passage: "` | |
+| `OBSIDIAN_EMBEDDING_DOC_PREFIX` | `"passage: "` | Applied unconditionally — unlike servers that infer it from the model name. |
+| `OBSIDIAN_EMBEDDING_TLS_VERIFY` | `true` | `true` \| `false`. Only turn off against a host you control. |
+| `OBSIDIAN_EMBEDDING_CA_CERT` | none | PEM path, for an endpoint behind a private CA. |
 | `OBSIDIAN_EMBED_BATCH` | `16` | Chunks per provider request; large batches overrun local inference servers. |
+| `FASTEMBED_CACHE_DIR` | under the semantic home | Where the **local** provider caches downloaded model files. |
 
 Asymmetric models (Arctic, E5, Nomic, Qwen) expect these prefixes; sending none
 silently costs accuracy. Here the query prefix alone was worth nDCG 0.675 → 0.706.
 
 ### Server
 
-| variable | default |
-|---|---|
-| `OBSIDIAN_VAULT_PATH` | required |
-| `OBSIDIAN_TRANSPORT` | `stdio` |
-| `OBSIDIAN_HTTP_PORT` / `_HOST` | `37842` / `127.0.0.1` |
-| `OBSIDIAN_WATCH` | `true` |
-| `OBSIDIAN_TANTIVY` | `true` |
-| `OBSIDIAN_SEMANTIC_MODE` | `auto` — `auto` \| `local` \| `daemon` |
-| `OBSIDIAN_MCP_DATA` | `{vault}/.obsidian-mcp` |
-| `OBSIDIAN_EXCLUDE_PATHS` | none |
-| `OBSIDIAN_TOOLS` | `full` |
+| variable | default | options / notes |
+|---|---|---|
+| `OBSIDIAN_VAULT_PATH` | **required** | Absolute path to the vault root. Can instead be passed as the first CLI argument. |
+| `OBSIDIAN_TRANSPORT` | `stdio` | `stdio` \| `http`. `--http` on the command line wins over this. |
+| `OBSIDIAN_HTTP_HOST` | `127.0.0.1` | Bind address. Anything other than loopback exposes the vault to your network — there is no authentication. |
+| `OBSIDIAN_HTTP_PORT` | `37842` | |
+| `OBSIDIAN_WATCH` | `true` | `true` \| `false`. Re-index on filesystem change. Setting it `false` also disables the semantic daemon. |
+| `OBSIDIAN_TANTIVY` | `true` | `true` \| `false`. BM25 index; `search_text` and `search_regex` need it. |
+| `OBSIDIAN_TOOLS` | `full` | A profile (`full` \| `core` \| `read` \| `minimal`), a comma-separated allow-list of tool names, or a `!`-prefixed deny-list. See [Tools](#tools). |
+| `OBSIDIAN_EXCLUDE_PATHS` | none | Comma-separated globs. A trailing `/` expands to `/**`, so `Archive/` is enough. Merged with the vault's `.obsidian-mcp/ignore` file. |
+| `OBSIDIAN_MCP_DATA` | `{vault}/.obsidian-mcp` | Move the index and cache off the vault. |
+| `OBSIDIAN_LOG_LEVEL` | `info` | Any `tracing` filter: `error` \| `warn` \| `info` \| `debug` \| `trace`, or a per-module directive such as `obsidian_mcp::vault=debug`. Logs go to stderr. |
+
+### Semantic runtime and daemon
+
+The daemon holds the vector index in its own process so it survives a server
+restart. It is spawned automatically; these only matter if you want to change
+that.
+
+| variable | default | options / notes |
+|---|---|---|
+| `OBSIDIAN_SEMANTIC_MODE` | `auto` | `auto` \| `local` \| `daemon`. `auto` uses the daemon when one is reachable and falls back in-process. `local` never uses it — **required if you want provenance on `search_semantic`**, see [Retrieval provenance](#retrieval-provenance). `daemon` refuses to fall back. |
+| `OBSIDIAN_SEMANTIC_MODEL` | `BAAI/bge-small-en-v1.5` | Identity label the daemon records and matches against. It does **not** select the API model — that is `OBSIDIAN_EMBEDDING_API_MODEL`. A client whose label differs is refused, which is what stops two models sharing one index. |
+| `OBSIDIAN_SEMANTIC_PREFETCH` | `50` | Candidates fetched before filtering. Clamped to `[1, 1000]`. |
+| `OBSIDIAN_SEMANTIC_HOME` | `%APPDATA%/obsidian-semantic`, `$XDG_STATE_HOME/obsidian-semantic` | Where the daemon keeps manifests, sockets and per-vault indexes. |
+| `OBSIDIAN_SEMANTIC_DAEMON_PATH` | sibling of the binary | Override the daemon executable. |
+| `OBSIDIAN_SEMANTIC_ENDPOINT` | derived from the home path | Unix socket path or Windows named pipe. |
+| `OBSIDIAN_SEMANTIC_CONNECT_TIMEOUT_MS` | `2000` | Clamped to `[100, 60000]`. |
+| `OBSIDIAN_SEMANTIC_CONNECT_RETRIES` | `2` | Clamped to `[0, 10]`. |
+| `OBSIDIAN_SEMANTIC_RETRY_BACKOFF_MS` | `250` | Clamped to `[50, 60000]`. |
+| `OBSIDIAN_SEMANTIC_DAEMON_DOWNLOAD_URL` | none | Fetch the daemon binary rather than resolving a sibling. |
+| `OBSIDIAN_SEMANTIC_ALPHA` | `0.25` | Alias for `OBSIDIAN_HYBRID_ALPHA`; this one is read first. |
+
+### Changing configuration
+
+Everything is environment variables — there is no config file. Set them in
+whatever launches the server.
+
+**One-off, current shell:**
+
+```bash
+OBSIDIAN_VAULT_PATH=/path/to/vault OBSIDIAN_TOOLS=read obsidian-mcp --http
+```
+
+```powershell
+$env:OBSIDIAN_VAULT_PATH = "D:\Vault"
+$env:OBSIDIAN_TOOLS = "read"
+obsidian-mcp --http
+```
+
+**Persistently** — put them in a launcher script next to the binary, which also
+records *why* each value is set:
+
+```bash
+#!/usr/bin/env bash
+export OBSIDIAN_VAULT_PATH="$HOME/Vault"
+export OBSIDIAN_EMBEDDINGS=true
+export OBSIDIAN_EMBEDDING_PROVIDER=api
+export OBSIDIAN_EMBEDDING_API_BASE=http://localhost:11434/v1
+export OBSIDIAN_EMBEDDING_API_MODEL=snowflake-arctic-embed2:latest
+export OBSIDIAN_EMBEDDING_API_KEY=ollama       # Ollama ignores it, but one is required
+export OBSIDIAN_TOOLS=read
+exec obsidian-mcp --http
+```
+
+**In an MCP client**, if it launches the server over stdio, use its `env` block:
+
+```jsonc
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "obsidian-mcp",
+      "env": { "OBSIDIAN_VAULT_PATH": "/path/to/vault", "OBSIDIAN_TOOLS": "read" }
+    }
+  }
+}
+```
+
+**Confirm what actually took effect** rather than assuming — under HTTP the
+server reports its own resolved configuration:
+
+```bash
+curl -s http://127.0.0.1:37842/api/info | jq '.config, .embeddings'
+```
+
+Two of these are read at *startup only*, so a change needs a restart: the tool
+filter and the exclusion patterns. Changing `OBSIDIAN_EXCLUDE_PATHS` also
+changes the set of indexed notes, so the next start re-embeds the difference.
+
+> **The daemon inherits the environment of whatever spawned it.** If you change
+> an embedding or exclusion variable, restart the *server*; the daemon it
+> launches picks the new value up from there. A daemon left running from an
+> earlier server keeps the old one.
+
+`obsidian-mcp --help` prints the full list as the binary sees it, which is the
+authority if this table and the binary ever disagree.
 
 ## Status dashboard
 
@@ -553,6 +653,24 @@ entry on it produced a wrong number here first.
 
 Ideas from the second project were reimplemented, not copied; no code was taken
 from it.
+
+### Built on
+
+| | |
+|---|---|
+| **[rmcp](https://crates.io/crates/rmcp)** | The official Rust MCP SDK — protocol, tool router, and both transports. |
+| **[Tantivy](https://github.com/quickwit-oss/tantivy)** | BM25 full-text index behind `search_text` and `search_regex`. |
+| **[fastembed-rs](https://github.com/Anush008/fastembed-rs)** | In-process ONNX embeddings for the `local` provider. |
+| **[notify](https://github.com/notify-rs/notify)** | Filesystem watching for incremental re-indexing. |
+| **[schemars](https://github.com/GREsau/schemars)** | Derives the JSON Schemas published for every tool's inputs and outputs. |
+| **[Snowflake Arctic Embed 2.0](https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0)** | The embedding model the reported numbers were measured with, served locally through **[Ollama](https://ollama.com)**. |
+
+### Given back
+
+- **[lstpsche/obsidian-mcp#25](https://github.com/lstpsche/obsidian-mcp/issues/25)**
+  — `OBSIDIAN_TOOLS` is not enforced. Found here, reported upstream with a
+  reproduction and the one-line fix, since it affects any deployment relying on
+  a read-only profile.
 
 ## Documentation
 

@@ -220,17 +220,42 @@ impl VaultContext {
         query: &str,
         top_k: usize,
     ) -> VaultResult<Vec<(PathBuf, f32)>> {
-        let current_paths = self
+        let current_paths = self.indexed_paths()?;
+        self.embedding_runtime
+            .query_snapshot()?
+            .semantic_scores_for_paths(query, &current_paths, top_k)
+    }
+
+    /// As [`Self::search_semantic_scores`], but reports which representation
+    /// matched so the caller can resolve it to a passage.
+    ///
+    /// The daemon exposed only note-level scores, which is why a daemon-served
+    /// `search_semantic` returned no provenance while the in-process path
+    /// returned it in full. The store always knew; nothing asked it.
+    // `pub(crate)`, not `pub`: `NoteMatch` is a crate-internal type, and a
+    // public method returning it would leak it into the public surface.
+    #[cfg(has_embeddings)]
+    pub(crate) fn search_semantic_hits(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> VaultResult<Vec<(PathBuf, crate::vault::embeddings::NoteMatch)>> {
+        let current_paths = self.indexed_paths()?;
+        self.embedding_runtime
+            .query_snapshot()?
+            .semantic_hits_for_paths(query, &current_paths, top_k)
+    }
+
+    #[cfg(has_embeddings)]
+    fn indexed_paths(&self) -> VaultResult<std::collections::HashSet<PathBuf>> {
+        Ok(self
             .index
             .read()
             .map_err(|error| VaultError::Other(format!("daemon index lock poisoned: {error}")))?
             .notes()
             .keys()
             .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        self.embedding_runtime
-            .query_snapshot()?
-            .semantic_scores_for_paths(query, &current_paths, top_k)
+            .collect())
     }
 
     #[cfg(has_embeddings)]
