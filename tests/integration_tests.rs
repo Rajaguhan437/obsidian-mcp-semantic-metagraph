@@ -929,29 +929,29 @@ mod tool_filtering {
     }
 
     #[tokio::test]
-    async fn core_profile_exposes_15_tools() {
+    async fn core_profile_exposes_expected_tools() {
         let (_tmp, server) = build_server(ToolFilter::Profile("core".into())).await;
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 15, "core profile should expose 15 tools");
+        assert_eq!(tools.len(), 18, "core profile should expose 18 tools");
 
         assert!(server.tool_router.has_route("note_read"));
         assert!(server.tool_router.has_route("note_read_many"));
         assert!(server.tool_router.has_route("vault_list"));
         assert!(server.tool_router.has_route("search_text"));
-        assert!(server.tool_router.has_route("frontmatter"));
-        assert!(server.tool_router.has_route("note_inspect"));
+        assert!(server.tool_router.has_route("note_frontmatter"));
+        assert!(server.tool_router.has_route("note_metadata"));
 
         assert!(!server.tool_router.has_route("search_semantic"));
-        assert!(!server.tool_router.has_route("wikilinks"));
-        assert!(!server.tool_router.has_route("periodic"));
+        assert!(!server.tool_router.has_route("note_links"));
+        assert!(!server.tool_router.has_route("periodic_create"));
         assert!(!server.tool_router.has_route("open_in_obsidian"));
     }
 
     #[tokio::test]
-    async fn read_profile_exposes_12_tools() {
+    async fn read_profile_exposes_expected_tools() {
         let (_tmp, server) = build_server(ToolFilter::Profile("read".into())).await;
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 12, "read profile should expose 12 tools");
+        assert_eq!(tools.len(), 17, "read profile should expose 17 tools");
         assert!(
             server.tool_router.has_route("note_related"),
             "note_related is read-only and belongs in this profile"
@@ -962,16 +962,21 @@ mod tool_filtering {
         assert!(server.tool_router.has_route("vault_list"));
         assert!(server.tool_router.has_route("search_text"));
         assert!(server.tool_router.has_route("search_semantic"));
-        assert!(server.tool_router.has_route("wikilinks"));
+        assert!(server.tool_router.has_route("note_links"));
+        assert!(server.tool_router.has_route("note_frontmatter"));
+        assert!(server.tool_router.has_route("periodic_get"));
 
         assert!(!server.tool_router.has_route("note_create"));
         assert!(!server.tool_router.has_route("note_write"));
         assert!(!server.tool_router.has_route("note_delete"));
         assert!(!server.tool_router.has_route("note_move"));
+        // The two that used to leak in behind an `action` parameter.
+        assert!(!server.tool_router.has_route("note_frontmatter_edit"));
+        assert!(!server.tool_router.has_route("periodic_create"));
     }
 
     #[tokio::test]
-    async fn minimal_profile_exposes_6_tools() {
+    async fn minimal_profile_exposes_expected_tools() {
         let (_tmp, server) = build_server(ToolFilter::Profile("minimal".into())).await;
         let tools = server.tool_router.list_all();
         assert_eq!(tools.len(), 6, "minimal profile should expose 6 tools");
@@ -991,8 +996,8 @@ mod tool_filtering {
             );
         }
         assert!(!server.tool_router.has_route("search_regex"));
-        assert!(!server.tool_router.has_route("wikilinks"));
-        assert!(!server.tool_router.has_route("frontmatter"));
+        assert!(!server.tool_router.has_route("note_links"));
+        assert!(!server.tool_router.has_route("note_frontmatter"));
         assert!(!server.tool_router.has_route("note_read_many"));
     }
 
@@ -1015,7 +1020,7 @@ mod tool_filtering {
 
     #[tokio::test]
     async fn deny_list_hides_only_listed_tools() {
-        let denied: HashSet<String> = ["open_in_obsidian", "wikilinks", "note_read_many"]
+        let denied: HashSet<String> = ["open_in_obsidian", "note_links", "note_read_many"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -1028,7 +1033,7 @@ mod tool_filtering {
         );
 
         assert!(!server.tool_router.has_route("open_in_obsidian"));
-        assert!(!server.tool_router.has_route("wikilinks"));
+        assert!(!server.tool_router.has_route("note_links"));
         assert!(!server.tool_router.has_route("note_read_many"));
         assert!(server.tool_router.has_route("note_read"));
         assert!(server.tool_router.has_route("vault_list"));

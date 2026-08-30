@@ -1,340 +1,367 @@
-# Tool reference
+# Tools
 
-**20 tools.** Parameter names below are the **actual JSON schema names**, read
-out of the source rather than written from memory — several differ from what you
-would guess (`note_move` takes `from`/`to`, not `from_path`/`to_path`;
-`search_metadata` takes `type`, not `search_type`).
+27 tools. Generated from `src/tools/mod.rs` and the `Params` structs, and
+checked by `bench/verify_tools_doc.py` — if this file and the source disagree, the source wins.
 
-Anything marked **required** has no default and the call fails without it.
-Defaults in the notes column are what the server applies when the field is
-omitted.
+## Choosing one
 
-## Index
+The tools are deliberately narrow, so picking the right one is most of using them well.
 
-| tool | does | needs semantic |
+| you have | you want | tool |
 |---|---|---|
-| [`search_semantic`](#search_semantic) | meaning-based retrieval over passages | yes |
-| [`search_text`](#search_text) | BM25 full-text with field boosts | no |
-| [`search_regex`](#search_regex) | regex across note bodies | no |
-| [`search_metadata`](#search_metadata) | query tags and frontmatter | no |
-| [`note_related`](#note_related) | notes about the same subject as a given note | yes |
-| [`wikilinks`](#wikilinks) | backlinks, outgoing, broken, orphans | no |
-| [`note_read`](#note_read) | full markdown of one note | no |
-| [`note_read_many`](#note_read_many) | several notes, byte-capped | no |
-| [`note_inspect`](#note_inspect) | headings, tags, block refs, backlink count | no |
-| [`frontmatter`](#frontmatter) | read or modify frontmatter fields | no |
-| [`note_create`](#note_create) | create a note | no |
-| [`note_write`](#note_write) | replace a note's whole content | no |
-| [`note_insert`](#note_insert) | insert content at a position | no |
-| [`note_patch`](#note_patch) | targeted edit at a heading, block or field | no |
-| [`note_move`](#note_move) | move or rename | no |
-| [`note_delete`](#note_delete) | delete, with an explicit confirm | no |
-| [`vault_list`](#vault_list) | list notes and directories | no |
-| [`vault_info`](#vault_info) | counts, tags, index status | no |
-| [`periodic`](#periodic) | daily/weekly/monthly periodic notes | no |
-| [`open_in_obsidian`](#open_in_obsidian) | open a note in the Obsidian app | no |
+| words that appear in the note | the notes containing them | `search_text` |
+| an idea, not the wording | notes that mean the same thing | `search_semantic` |
+| a structural pattern | every literal match | `search_regex` |
+| a tag | notes labelled with it | `search_tags` |
+| a YAML property | notes whose frontmatter matches | `search_frontmatter` |
+| a note | others about the same subject | `note_related` |
+| a note | what links to and from it | `note_links` |
+| a note path | its text | `note_read` |
+| a note path | its tags, headings and links only | `note_metadata` |
+| nothing yet | to see how the vault is organised | `vault_list` |
 
-"Needs semantic" means the tool requires a build with `embeddings` or
-`embeddings-api` **and** `OBSIDIAN_EMBEDDINGS=true`. The other 18 work with
-neither.
+### Reading a semantic result
 
----
+`search_semantic` and `note_related` return **attribution and evidence as separate fields**, and conflating them is the mistake the design exists to prevent:
 
-## Search
+- **`match_type`** — *why* the note ranked. `"chunk"` means one passage matched. `"summary"` means the note's overall gist matched.
+- **`best_chunk`** — the note's closest passage, with its `heading_path`. Always present when the note has chunks.
+
+When `match_type` is `"summary"`, `best_chunk` is **not** the reason the note was found. Quote it as context, never as the cause.
+
+## Profiles
+
+`OBSIDIAN_TOOLS` accepts a profile name, a comma-separated allow-list, or a `!`-prefixed deny-list.
+
+| profile | tools | includes |
+|---|---|---|
+| `full` | 27 | everything (default) |
+| `core` | 18 | read + write, no semantic search |
+| `read` | 17 | **strictly read-only** |
+| `minimal` | 6 | the smallest useful set |
+
+No tool mixes reading and writing, which is what makes `read` trustworthy: the filter matches on names, so a tool multiplexing both behind an `action` parameter could not be excluded without losing its read half. `read` is asserted write-free by `read_profile_admits_nothing_that_can_write`.
+
+## Search — finding notes you cannot name
 
 ### `search_semantic`
 
-Meaning-based retrieval over chunk and summary vectors.
+Find notes by meaning rather than wording. Use this when you have a question or an idea and do not know which words the note actually uses; use search_text instead when you know the terms that appear in it. Returns `{ results: [...] }`, ranked most similar first, each hit carrying a snippet and its provenance: `match_type` says WHY the note ranked — "chunk" (one specific passage matched), "summary" (the note's overall gist matched), or "whole_note". `best_chunk` is always present and carries the closest passage with its `heading_path`, but when `match_type` is "summary" that passage did NOT cause the ranking, so do not cite it as the reason the note was found. Requires semantic search to be enabled; while the index is still building this returns an explicit "warming" error with progress rather than degrading silently.
 
-| param | required | notes |
-|---|---|---|
-| `query` | **yes** | natural language; no keyword overlap needed |
-| `top_k` | no | default 10 |
-| `include_content` | no | default false; true returns each note's full body |
-| `lexical_prefetch` | no | default false. **Leave it false** — see below |
-| `alpha` | no | BM25 weight in the legacy prefetch path only; 0.0–1.0, default 0.25 |
+*Profiles: `read`*
 
-**Results carry retrieval provenance** — `match_type`, `best_chunk`,
-`summary_score`. See [Retrieval provenance](../README.md#retrieval-provenance)
-for what those mean and when each is present.
-
-`score` is a **ranking score, not a cosine**: a weighted summary match can exceed
-1.0.
-
-**On `lexical_prefetch`:** true enables the legacy BM25-gated re-rank, which
-scores only the top `DEFAULT_PREFETCH_COUNT = 50` lexical hits. A note BM25 never
-surfaces cannot be recovered. On the development corpus that cap cost up to
-**0.30 nDCG**. It is retained for compatibility, not because it helps.
-
-While the index is warming this returns an explicit "not ready" error rather than
-silently degrading to lexical-only results.
+| param | type | required | description |
+|---|---|---|---|
+| `query` | `String` | yes | Natural-language query for semantic search. Does not require exact keyword matches — conceptually similar notes are returned. |
+| `top_k` | `Option<usize>` | no | Number of results to return (default: 10). |
+| `include_content` | `Option<bool>` | no | If true, include the full note content in each result. Default: false. |
+| `lexical_prefetch` | `Option<bool>` | no | When true, first retrieves top candidates via BM25 lexical search, then re-ranks by combining lexical and semantic scores. Produces higher-quality results than either approach alone. Requires both Tantivy and embeddings to be enabled. Default: false. |
+| `alpha` | `Option<f32>` | no | Blending weight for hybrid re-ranking: `alpha * BM25 + (1-alpha) * semantic`. Only used when `lexical_prefetch` is true. Lower values favor semantic similarity. Overrides the `OBSIDIAN_HYBRID_ALPHA` env var for this query. Range: 0.0–1.0, default: 0.25. |
 
 ### `search_text`
 
-Tantivy BM25 across title, headings, tags, frontmatter and the **full body**,
-with field boosts (title 5.0, tags 4.0, headings 3.0, frontmatter 2.0, body 1.0).
-Use it for exact strings, identifiers and terminology.
+Find notes containing particular words, ranked by BM25. Use when you know terms that literally appear in the note; use search_semantic when you only know the idea. Stems words, so "program" matches "programming", and can tolerate typos when fuzzy matching is enabled. Returns ranked note paths with a relevance score and the matching context snippet.
 
-| param | required | notes |
-|---|---|---|
-| `query` | **yes** | stemmed — "program" matches "programming" |
-| `context_length` | no | default 100, capped at 2000 |
-| `max_results` | no | default 20, capped at 200 |
-| `fuzzy` | no | default false; edit distance 1 |
-| `fields` | no | subset of `title`, `headings`, `tags`, `body`, `frontmatter`; default all |
+*Profiles: `core`, `read`, `minimal`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `query` | `String` | yes | Natural-language search query. Supports stemming (e.g. "program" matches "programming"). Results are ranked by BM25 relevance. |
+| `context_length` | `Option<usize>` | no | Characters of context around each match (default: 100). |
+| `max_results` | `Option<usize>` | no | Maximum number of file results to return (default: 20). |
+| `fuzzy` | `Option<bool>` | no | Enable fuzzy matching with edit distance 1 (tolerates typos). Default: false. |
+| `fields` | `Option<Vec<SearchField>>` | no | Restrict search to specific note fields. Default: all fields. Allowed values: `title`, `headings`, `tags`, `body`, `frontmatter`. |
 
 ### `search_regex`
 
-Regex across note bodies. Pattern length and compiled size are bounded.
+Find notes whose text matches a regular expression. Use for structural patterns that word search cannot express — dates, identifiers, TODO markers, code shapes. Prefer search_text for ordinary words: regex does no stemming and no relevance ranking. Returns matching note paths with context snippets.
 
-| param | required | notes |
-|---|---|---|
-| `pattern` | **yes** | |
-| `context_length` | no | default 100 |
-| `max_results` | no | default 20 |
+*Profiles: `core`, `read`*
 
-### `search_metadata`
+| param | type | required | description |
+|---|---|---|---|
+| `pattern` | `String` | yes | Regular expression pattern to search for. |
+| `context_length` | `Option<usize>` | no | Characters of context around each match (default: 100). |
+| `max_results` | `Option<usize>` | no | Maximum number of file results to return (default: 20). |
 
-Structured queries over tags and frontmatter.
+### `search_tags`
 
-| param | required | notes |
-|---|---|---|
-| `type` | **yes** | `"tag"` or `"frontmatter"`. **The JSON key is `type`**, not `search_type` |
-| `tag` | when `type` is `tag` | a leading `#` is stripped if present |
-| `include_nested` | no | default **true** — `inbox` also matches `inbox/read` |
-| `field` | when `type` is `frontmatter` | frontmatter key |
-| `value` | for `eq` and `contains` | pass arrays/objects as JSON; a JSON-encoded string compares as a literal string |
-| `operator` | no | `eq` (default), `contains`, `exists` |
+Find notes carrying a tag, matching both inline #tags and frontmatter tags. Use when filtering by an explicit label the user applied, rather than by what a note says. `include_nested` (default true) also matches children, so "inbox" matches "inbox/read". Returns the matching note paths.
 
----
+*Profiles: `core`, `read`*
 
-## Relate
+| param | type | required | description |
+|---|---|---|---|
+| `tag` | `String` | yes | Tag to search for, without the `#` prefix. |
+| `include_nested` | `Option<bool>` | no | Also match nested tags, so `inbox` matches `inbox/read`. Default: true. |
+
+### `search_frontmatter`
+
+Find notes by the value of a frontmatter field. Use for structured properties kept in YAML — status, type, author, date — rather than prose; use search_tags for tags specifically. `operator` is "eq" (default), "contains" (substring for strings, membership for arrays), or "exists" (value ignored). Returns the matching note paths.
+
+*Profiles: `core`, `read`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `field` | `String` | yes | Frontmatter field name to query. |
+| `operator` | `Option<FrontmatterOperator>` | no | Comparison operator. Default: `eq`. |
+| `value` | `Option<serde_json::Value>` | no | — |
+
+## Relate — starting from a note you have
 
 ### `note_related`
 
-What else in the vault is about this note. Seeded from the note's own stored
-embedding, so it needs no query string and costs no embedding call.
+Find notes about the same subject as a note you already have, seeded from that note's own embedding — no query string needed. Use when you have a note and want its neighbours; use search_semantic when you have a question instead of a note. Each result carries `linked`: false means no wikilink joins them yet, which is usually the interesting case — a connection the vault has not recorded. Also returns the note's existing outgoing links and backlinks for comparison. Results carry the same `match_type` / `best_chunk` provenance as search_semantic, with the same caveat about summary matches. Requires semantic search to be enabled.
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | vault-relative path of the subject note |
-| `top_k` | no | default 10, max 50 |
-| `include_passages` | no | default true; false omits passage text for a compact list |
+*Profiles: `read`*
 
-**Returns** the semantically nearest notes *and* the note's existing links, so
-the two can be compared:
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Vault-relative path of the note to find relatives of. |
+| `top_k` | `Option<usize>` | no | Maximum semantically related notes to return (default: 10, max: 50). |
+| `include_passages` | `Option<bool>` | no | Include the matched passage and heading path for each result (default: true). Set false for a compact list of paths and scores. |
 
-| field | notes |
-|---|---|
-| `related[]` | nearest notes, each with `score`, `match_type`, `best_chunk`, and **`linked`** |
-| `linked.outgoing` / `linked.backlinks` | what the graph already records |
-| `unlinked_related` | how many of `related` are not linked either way |
+### `note_links`
 
-**`linked: false` is the interesting case** — a note clearly about the same
-subject that the vault does not connect. Scoring is identical to
-`search_semantic`, so `score` is comparable between the two tools.
+Get both link directions for one note in a single call. Use to see where a note sits in the graph as actually recorded; use note_related for connections by meaning that the graph does not yet capture. Returns `{ path, backlinks, outgoing }` — backlinks being the notes that link TO it with the specific wikilinks involved, outgoing being the links FROM it, each with its resolution status (`resolved_path` is null when the link is broken).
 
-The seed is the note's **summary** vector (title + every heading + first 400
-words), which answers "what is this note about" rather than "what matches one of
-its paragraphs". Notes indexed with `OBSIDIAN_SUMMARY_WEIGHT=0` fall back to
-their first chunk.
+*Profiles: `read`*
 
-Errors explicitly when the subject note has no embeddings yet, rather than
-reporting that nothing is similar.
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
 
----
+### `vault_broken_links`
 
-## Graph
+List wikilinks that point at nothing — vault-wide, or within one note if `path` is given. Use to find typos and links left dangling by a rename. Returns each broken link with its source note, the raw link text, and the unresolved target.
 
-### `wikilinks`
+*Profiles: `read`*
 
-| param | required | notes |
-|---|---|---|
-| `query` | **yes** | `backlinks` \| `outgoing` \| `broken` \| `orphans` |
-| `path` | for `backlinks` and `outgoing` | optional for `broken`, unused for `orphans` |
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `Option<String>` | no | Restrict the scan to a single note. Omit to scan the entire vault. |
 
-- **backlinks** — sources linking to a note, with each link's raw text and line
-- **outgoing** — links from a note, each with `resolved_path` (null if broken),
-  `heading`, `block_ref`, `alias`
-- **broken** — links whose target does not resolve
-- **orphans** — disconnected notes, with `status` separating "no links at all"
-  from "only broken links"
+### `vault_orphans`
 
-Results are **not deterministically ordered** (hash-map iteration). Compare
-order-insensitively; do not snapshot-test the sequence.
+List notes disconnected from the resolvable link graph. Use to find notes nothing points to. Returns each note with a `status` distinguishing "no_links" (nothing in either direction) from "broken_outgoing_only" (it links out, but every one of those links is broken), plus the broken targets involved.
 
----
+*Profiles: `read`*
+
+No parameters.
 
 ## Read
 
 ### `note_read`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | vault-relative, e.g. `"folder/note.md"` |
+Read one note's full content as raw markdown, frontmatter included. Use when you know the path and need the text. Use note_read_many for several notes at once, or note_metadata when you only need its tags, headings and links rather than its body.
 
-Returns the full markdown, frontmatter included.
+*Profiles: `core`, `read`, `minimal`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root (e.g. "folder/note.md"). |
 
 ### `note_read_many`
 
-Several notes at once, byte-capped so a large selection cannot flood a context
-window.
+Read several notes in one bounded call. Use instead of repeated note_read calls. Provide exactly one of `paths` or `dir`; directory reads are non-recursive unless asked otherwise. Inspects at most 100 files and returns at most 262144 combined content bytes — anything left out is listed in `skipped` with a reason, so check that field rather than assuming you received everything. Fall back to note_read for a single deliberately oversized note.
 
-| param | required | notes |
-|---|---|---|
-| `paths` | either this or `dir` | explicit paths, returned in the given order |
-| `dir` | either this or `paths` | vault-relative directory; empty string means vault root |
-| `recursive` | no | default false; only valid with `dir` |
-| `glob` | no | pattern over vault-relative paths; only valid with `dir` |
-| `max_files` | no | default 20, capped |
-| `max_bytes` | no | default 65536 combined UTF-8 bytes |
+*Profiles: `core`, `read`*
 
-`paths` and `dir` are mutually exclusive.
+| param | type | required | description |
+|---|---|---|---|
+| `paths` | `Option<Vec<String>>` | no | Explicit note paths, in the order they should be returned. Mutually exclusive with `dir`. |
+| `dir` | `Option<String>` | no | Directory path relative to vault root. Use an empty string for vault root. Mutually exclusive with `paths`. |
+| `recursive` | `Option<bool>` | no | Include note files in nested directories. Defaults to false and is only valid with `dir`. |
+| `glob` | `Option<String>` | no | Glob pattern applied to vault-relative paths. Only valid with `dir`. |
+| `max_files` | `Option<usize>` | no | Maximum candidate files inspected. Defaults to 20 and is capped at 100. |
+| `max_bytes` | `Option<usize>` | no | Maximum combined UTF-8 content bytes returned. Defaults to 65536 and is capped at 262144. |
 
-### `note_inspect`
+### `note_metadata`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | |
-| `view` | no | `"metadata"` (default) or an alternate view |
+Get one note's metadata without its body. Use to judge a note cheaply before deciding whether to read it, or to count its backlinks. Returns title, tags, frontmatter, headings, outgoing links, block references, backlinks count and file stats. Use note_read for the text itself.
 
-Headings, tags, block references and backlink count — without the body. Cheaper
-than `note_read` when you only need structure.
+*Profiles: `core`, `read`*
 
-### `frontmatter`
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
 
-| param | required | notes |
-|---|---|---|
-| `action` | **yes** | `"get"`, `"set"`, `"remove"` |
-| `path` | **yes** | |
-| `key` | for `set` and `remove` | frontmatter key |
-| `value` | for `set` | JSON value; arrays and objects pass through directly |
+### `note_frontmatter`
 
----
+Read a note's frontmatter as JSON, or null if it has none. Read-only — use note_frontmatter_edit to change a field.
 
-## Write
+*Profiles: `core`, `read`*
 
-All writes update the vault index, the lexical index and the link graph
-incrementally, and queue the note for re-embedding.
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+
+### `note_patch_targets`
+
+List the addressable targets in a note: headings with their Markdown level markers ("## Log"), block references, and frontmatter field names. Call this before note_patch to learn exactly which `target` values that note will accept, rather than guessing. Returns `{ headings, block_refs, frontmatter_fields }`.
+
+*Profiles: `core`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+
+## Write — these modify the vault
 
 ### `note_create`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | parent directories are created |
-| `content` | no | defaults to empty |
-| `frontmatter` | no | JSON object, e.g. `{"tags": ["rust"]}` |
+Create a new note, with optional content and YAML frontmatter. Parent directories are created automatically. Fails if the note already exists — use note_write to replace one that does.
+
+*Profiles: `core`, `minimal`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path for the new note, relative to vault root. Parent dirs are created automatically. |
+| `content` | `Option<String>` | no | Initial body content. Defaults to empty. |
+| `frontmatter` | `Option<serde_json::Value>` | no | — |
 
 ### `note_write`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | |
-| `content` | **yes** | replaces the entire note |
+Replace a note's entire content. The note must already exist; use note_create for a new one. This discards whatever is currently there — prefer note_insert to add to a note, or note_patch to change one section of it.
+
+*Profiles: `core`, `minimal`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+| `content` | `String` | yes | New content that replaces the entire note. |
 
 ### `note_insert`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | |
-| `content` | **yes** | |
-| `position` | no | `"end"` (default) appends after existing content |
+Add content to an existing note without replacing what is there. `position` "end" (default) appends; "beginning" inserts after the frontmatter, or at the very start if the note has none. Use note_patch instead when you need to land the content inside a specific section.
+
+*Profiles: `core`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+| `content` | `String` | yes | Content to insert. |
+| `position` | `Option<String>` | no | Where to insert: `"end"` (default) appends after existing content; `"beginning"` inserts after frontmatter (or at the very start if no frontmatter). |
 
 ### `note_patch`
 
-Targeted edit without rewriting the note.
+Modify one section of a note, addressed by heading, block reference, or frontmatter field, with `operation` append, prepend or replace. Call note_patch_targets first to learn the valid `target` values for that note; heading targets accept either bare text ("Log") or the marker-prefixed form ("## Log").
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | |
-| `operation` | **yes** | `append`, `prepend`, `replace` |
-| `target_type` | **yes** | `heading`, `block`, `frontmatter` |
-| `target` | **yes** | heading text, block ID, or frontmatter field |
-| `content` | **yes** | |
+*Profiles: `core`*
 
-**Nested headings use `::`** — `"Introduction::Background"` targets the
-`Background` heading beneath `Introduction` (`HEADING_DELIMITER`,
-`src/vault/patch.rs`).
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+| `operation` | `PatchOperation` | yes | Patch operation: `append`, `prepend`, or `replace`. |
+| `target_type` | `PatchTargetType` | yes | Target type: `heading`, `block`, or `frontmatter`. |
+| `target` | `String` | yes | Target identifier — heading text, block ID, or frontmatter field name. For headings, bare text such as `"Log"` is canonical; ATX marker-prefixed targets such as `"## Log"` are also accepted. |
+| `content` | `String` | yes | Content to insert or replace with. |
+
+### `note_frontmatter_edit`
+
+Set or remove a single frontmatter field. `action` is "set" (upsert, requires `value`) or "remove". Pass arrays and objects as real JSON, not as encoded strings. Reading frontmatter is a separate tool, note_frontmatter.
+
+*Profiles: `core`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+| `action` | `String` | yes | Edit to apply: `"set"` (upsert a field) or `"remove"` (delete a field). |
+| `key` | `String` | yes | Frontmatter key to set or remove. |
+| `value` | `Option<serde_json::Value>` | no | — |
 
 ### `note_move`
 
-| param | required | notes |
-|---|---|---|
-| `from` | **yes** | **not** `from_path` |
-| `to` | **yes** | **not** `to_path` |
+Move or rename a note. Destination parent directories are created automatically. Wikilinks in other notes are NOT rewritten, so a rename can leave links pointing at the old name — run vault_broken_links afterwards to find any this breaks.
+
+*Profiles: `core`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `from` | `String` | yes | Current path of the note, relative to vault root. |
+| `to` | `String` | yes | Destination path, relative to vault root. |
 
 ### `note_delete`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | |
-| `confirm` | **yes** | must be `true`; there is no default |
+Delete a note from the vault. Requires `confirm: true`, so that a call made by mistake fails instead of destroying a note. This is irreversible and there is no undo.
 
----
+*Profiles: `core`*
 
-## Navigate
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Path to the note, relative to vault root. |
+| `confirm` | `bool` | yes | Must be `true` to confirm deletion — a safety check to prevent accidental data loss. |
+
+## Periodic notes
+
+### `periodic_get`
+
+Read the periodic note for a date — daily, weekly, monthly, quarterly or yearly. `date` defaults to today. Read-only: if the note does not exist this returns an error rather than creating it. Use periodic_create to make one.
+
+*Profiles: `read`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `period` | `NotePeriod` | yes | Period type: daily, weekly, monthly, quarterly, yearly. |
+| `date` | `Option<String>` | no | ISO date (YYYY-MM-DD). Defaults to today. |
+
+### `periodic_list`
+
+List recent periodic notes of one period, newest first. Use to find which dates actually have notes before reading them. `limit` defaults to 10. Returns a path and date for each.
+
+*Profiles: `read`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `period` | `NotePeriod` | yes | Period type: daily, weekly, monthly, quarterly, yearly. |
+| `limit` | `Option<usize>` | no | Maximum number of notes to return (default: 10). |
+
+### `periodic_create`
+
+Create the periodic note for a date, expanded from its configured template or from `content` if you supply it. `date` defaults to today. This writes to the vault.
+
+*Profiles: `full` only*
+
+| param | type | required | description |
+|---|---|---|---|
+| `period` | `NotePeriod` | yes | Period type: daily, weekly, monthly, quarterly, yearly. |
+| `date` | `Option<String>` | no | ISO date (YYYY-MM-DD). Defaults to today. |
+| `content` | `Option<String>` | no | Custom content; overrides template expansion. |
+
+## Vault
 
 ### `vault_list`
 
-| param | required | notes |
-|---|---|---|
-| `path` | no | directory; omit or empty for vault root |
-| `recursive` | no | default false |
-| `glob` | no | e.g. `"*.md"`, `"journal/**"` |
-| `format` | no | `"list"` (default, JSON array) or `"tree"` |
-| `max_depth` | no | limits depth in tree mode, path components in list mode |
-| `include_metadata` | no | default false; adds indexed note metadata in list mode |
+List files and directories. Use to explore how the vault is organised when you do not yet know what exists; use the search tools once you know what you are looking for. Supports recursive listing, glob filtering, and a tree view. Returns an array of paths, or objects with title, tags, size and timestamps when `include_metadata` is true; `format: "tree"` returns a formatted string instead.
+
+*Profiles: `core`, `read`, `minimal`*
+
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `Option<String>` | no | Directory path relative to vault root. Omit or leave empty for vault root. |
+| `recursive` | `Option<bool>` | no | List files recursively through subdirectories. Defaults to false. Only used in list mode. |
+| `glob` | `Option<String>` | no | Glob pattern to filter results (e.g., `"*.md"`, `"journal/**"`). Only used in list mode. |
+| `format` | `Option<String>` | no | Output format: `"list"` (default) returns a JSON array; `"tree"` returns a tree-formatted string. |
+| `max_depth` | `Option<usize>` | no | Maximum depth to display. In list mode, limits path component count. In tree mode, limits nesting depth. |
+| `include_metadata` | `Option<bool>` | no | Include indexed note metadata in list mode. Defaults to false and is invalid in tree mode. |
 
 ### `vault_info`
 
-**No parameters.** Returns counts, tags, index status, active exclusion patterns,
-and the resolved data directory.
+Aggregate statistics for the whole vault: total notes, files, tags, links and size in bytes. Use to gauge scale before a broad operation, or to confirm which vault you are connected to.
 
-### `periodic`
+*Profiles: `core`, `read`, `minimal`*
 
-| param | required | notes |
-|---|---|---|
-| `action` | **yes** | `"get"`, `"create"`, `"list"` |
-| `period` | **yes** | `daily`, `weekly`, `monthly`, `quarterly`, `yearly` |
-| `date` | no | ISO `YYYY-MM-DD`; defaults to today |
-| `content` | no | overrides template expansion; `create` only |
-| `limit` | no | default 10; `list` only |
+No parameters.
+
+## Utility
 
 ### `open_in_obsidian`
 
-| param | required | notes |
-|---|---|---|
-| `path` | **yes** | |
-| `new_leaf` | no | default false; new split pane, needs the Advanced URI plugin |
+Open a note in the Obsidian desktop app via the obsidian:// URI scheme. This acts on the user's machine rather than reading the vault, and requires Obsidian to be installed.
 
-Opens via the `obsidian://` URI scheme, so it needs the Obsidian app running.
-Every other tool works whether Obsidian is open or not.
+*Profiles: `full` only*
 
----
-
-## Restricting the surface
-
-`OBSIDIAN_TOOLS` accepts a profile, a comma-separated allow-list, or a
-`!`-prefixed deny-list.
-
-| profile | tools | for |
-|---|---|---|
-| `full` | 20 | everything (default) |
-| `core` | 15 | read + write, without semantic, graph or periodic |
-| `read` | 12 | read-only, including `search_semantic` and `note_related` |
-| `minimal` | 6 | read, create, write, list, text search, info |
-
-```bash
-OBSIDIAN_TOOLS=read
-OBSIDIAN_TOOLS='!note_delete,!note_write,!note_patch'
-```
-
-Giving an agent `read` is the safest way to let it explore a vault it must not
-modify.
-
----
-
-*Parameter names and requirements here were extracted from the `Params` structs
-in `src/tools/`, not transcribed. If you change a tool's schema, this file is
-what goes stale: the profile counts are covered by tests in
-`tests/integration_tests.rs`, the parameter names are not.*
+| param | type | required | description |
+|---|---|---|---|
+| `path` | `String` | yes | Note path relative to vault root. |
+| `new_leaf` | `bool` | yes | Open in a new split pane (requires Obsidian Advanced URI plugin). |

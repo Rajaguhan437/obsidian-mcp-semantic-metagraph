@@ -128,116 +128,34 @@ impl ObsidianMcp {
         }
     }
 
-    // ── Navigation ──────────────────────────────────────────────────
+    // ── Search: finding notes you cannot name ───────────────────────
+    //
+    // Every description below follows one shape — what the tool does, when to
+    // reach for it *instead of its siblings*, and what it hands back. The
+    // middle clause is the one that matters: an agent choosing between five
+    // search tools has nothing else to go on, and a wrong choice looks like an
+    // empty vault rather than a mistake.
 
     #[tool(
-        name = "vault_list",
-        description = "List files and directories in the vault. Supports recursive listing, glob filtering, and tree view (format: \"tree\"). List mode returns a JSON array of paths, or objects with indexed title, tags, size, and timestamps when include_metadata is true. Tree mode returns a tree-formatted string."
+        name = "search_semantic",
+        description = "Find notes by meaning rather than wording. Use this when you have a question or an idea and do not know which words the note actually uses; use search_text instead when you know the terms that appear in it. Returns `{ results: [...] }`, ranked most similar first, each hit carrying a snippet and its provenance: `match_type` says WHY the note ranked — \"chunk\" (one specific passage matched), \"summary\" (the note's overall gist matched), or \"whole_note\". `best_chunk` is always present and carries the closest passage with its `heading_path`, but when `match_type` is \"summary\" that passage did NOT cause the ranking, so do not cite it as the reason the note was found. Requires semantic search to be enabled; while the index is still building this returns an explicit \"warming\" error with progress rather than degrading silently."
     )]
-    async fn vault_list(
+    async fn search_semantic(
         &self,
-        Parameters(params): Parameters<navigation::VaultListParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        navigation::vault_list(&self.vault, params)
+        Parameters(params): Parameters<search::SearchSemanticParams>,
+    ) -> Result<Json<search::SemanticSearchOutput>, ErrorData> {
+        search::search_semantic(
+            &self.vault,
+            params,
+            self.hybrid_alpha,
+            &self.semantic_runtime,
+        )
+        .await
     }
-
-    // ── Note CRUD ───────────────────────────────────────────────────
-
-    #[tool(
-        name = "note_read",
-        description = "Read the full content of a note. Returns the raw markdown including frontmatter."
-    )]
-    async fn note_read(
-        &self,
-        Parameters(params): Parameters<notes::NoteReadParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_read(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_read_many",
-        description = "Read multiple notes in one bounded call. Provide exactly one of `paths` or `dir`; directory reads are non-recursive by default. The server inspects at most 100 files and returns at most 262144 combined content bytes. Oversized or unprocessed notes are reported in `skipped`; use note_read for an intentionally oversized note."
-    )]
-    async fn note_read_many(
-        &self,
-        Parameters(params): Parameters<notes::NoteReadManyParams>,
-    ) -> Result<Json<notes::NoteReadManyOutput>, ErrorData> {
-        notes::note_read_many(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_create",
-        description = "Create a new note with optional content and YAML frontmatter. Parent directories are created automatically. Fails if the note already exists."
-    )]
-    async fn note_create(
-        &self,
-        Parameters(params): Parameters<notes::NoteCreateParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_create(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_write",
-        description = "Overwrite a note's entire content. The note must already exist."
-    )]
-    async fn note_write(
-        &self,
-        Parameters(params): Parameters<notes::NoteWriteParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_write(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_insert",
-        description = "Insert content into an existing note. \
-            Position: \"end\" (default) appends after existing content; \
-            \"beginning\" inserts after frontmatter (or at the very start if none)."
-    )]
-    async fn note_insert(
-        &self,
-        Parameters(params): Parameters<notes::NoteInsertParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_insert(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_patch",
-        description = "Patch a specific section of a note by targeting a heading, block reference, or frontmatter field. Supports append, prepend, and replace operations. Heading targets use bare text such as \"Log\"; ATX marker-prefixed targets such as \"## Log\" are also accepted."
-    )]
-    async fn note_patch(
-        &self,
-        Parameters(params): Parameters<notes::NotePatchParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_patch(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_delete",
-        description = "Delete a note from the vault. Requires `confirm: true` as a safety check to prevent accidental data loss."
-    )]
-    async fn note_delete(
-        &self,
-        Parameters(params): Parameters<notes::NoteDeleteParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_delete(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "note_move",
-        description = "Move or rename a note. Parent directories at the destination are created automatically."
-    )]
-    async fn note_move(
-        &self,
-        Parameters(params): Parameters<notes::NoteMoveParams>,
-    ) -> Result<String, ErrorData> {
-        notes::note_move(&self.vault, params).await
-    }
-
-    // ── Search ──────────────────────────────────────────────────────
 
     #[tool(
         name = "search_text",
-        description = "BM25-ranked full-text search across all notes. Returns matching files with relevance scores and context snippets. Supports stemming (e.g. 'program' matches 'programming'), optional fuzzy matching for typo tolerance, and field-level filtering."
+        description = "Find notes containing particular words, ranked by BM25. Use when you know terms that literally appear in the note; use search_semantic when you only know the idea. Stems words, so \"program\" matches \"programming\", and can tolerate typos when fuzzy matching is enabled. Returns ranked note paths with a relevance score and the matching context snippet."
     )]
     async fn search_text(
         &self,
@@ -248,7 +166,7 @@ impl ObsidianMcp {
 
     #[tool(
         name = "search_regex",
-        description = "Search across all notes using a regular expression pattern. Returns matching files with context snippets."
+        description = "Find notes whose text matches a regular expression. Use for structural patterns that word search cannot express — dates, identifiers, TODO markers, code shapes. Prefer search_text for ordinary words: regex does no stemming and no relevance ranking. Returns matching note paths with context snippets."
     )]
     async fn search_regex(
         &self,
@@ -258,102 +176,260 @@ impl ObsidianMcp {
     }
 
     #[tool(
-        name = "search_metadata",
-        description = "Search notes by metadata. Set type=\"tag\" to find notes with a specific tag (both inline #tags and frontmatter tags), or type=\"frontmatter\" to query by frontmatter field value. For tags: provide `tag` (required) and optional `include_nested`. For frontmatter: provide `field` (required), optional `operator` (eq/contains/exists), and `value` (required for eq/contains)."
+        name = "search_tags",
+        description = "Find notes carrying a tag, matching both inline #tags and frontmatter tags. Use when filtering by an explicit label the user applied, rather than by what a note says. `include_nested` (default true) also matches children, so \"inbox\" matches \"inbox/read\". Returns the matching note paths."
     )]
-    async fn search_metadata(
+    async fn search_tags(
         &self,
-        Parameters(params): Parameters<search::SearchMetadataParams>,
+        Parameters(params): Parameters<search::SearchTagsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        search::search_metadata(&self.vault, params).await
+        search::search_tags(&self.vault, params).await
     }
 
     #[tool(
-        name = "search_semantic",
-        description = "Semantic search using daemon-backed runtime (preferred) with local compatibility fallback based on OBSIDIAN_SEMANTIC_MODE. Finds conceptually related notes without requiring exact keyword matches."
+        name = "search_frontmatter",
+        description = "Find notes by the value of a frontmatter field. Use for structured properties kept in YAML — status, type, author, date — rather than prose; use search_tags for tags specifically. `operator` is \"eq\" (default), \"contains\" (substring for strings, membership for arrays), or \"exists\" (value ignored). Returns the matching note paths."
     )]
-    async fn search_semantic(
+    async fn search_frontmatter(
         &self,
-        Parameters(params): Parameters<search::SearchSemanticParams>,
+        Parameters(params): Parameters<search::SearchFrontmatterParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        search::search_semantic(
-            &self.vault,
-            params,
-            self.hybrid_alpha,
-            &self.semantic_runtime,
-        )
-        .await
+        search::search_frontmatter(&self.vault, params).await
     }
 
-    // ── Metadata ────────────────────────────────────────────────────
-
-    #[tool(
-        name = "note_inspect",
-        description = "Inspect a note. Views: \"metadata\" (default) returns tags, headings, outgoing links, block refs, backlinks count, frontmatter, and file stats. \"targets\" lists patchable headings with Markdown level markers, block refs, and frontmatter fields (use before note_patch)."
-    )]
-    async fn note_inspect(
-        &self,
-        Parameters(params): Parameters<metadata::NoteInspectParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        metadata::note_inspect(&self.vault, params).await
-    }
-
-    #[tool(
-        name = "frontmatter",
-        description = "Read, set, or remove frontmatter fields on a note. Actions: \"get\" returns all frontmatter as JSON (or null), \"set\" upserts a field (requires key + value), \"remove\" deletes a field (requires key)."
-    )]
-    async fn frontmatter(
-        &self,
-        Parameters(params): Parameters<metadata::FrontmatterParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        metadata::frontmatter(&self.vault, params).await
-    }
-
-    // ── Graph / Links ───────────────────────────────────────────────
-
-    #[tool(
-        name = "wikilinks",
-        description = "Query the vault's wikilink graph. Queries: \"backlinks\" (requires path) finds notes linking TO a note, \"outgoing\" (requires path) finds links FROM a note with resolution status, \"broken\" (optional path) finds unresolved wikilinks, \"orphans\" finds disconnected notes."
-    )]
-    async fn wikilinks(
-        &self,
-        Parameters(params): Parameters<graph::WikilinksParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        graph::wikilinks(&self.vault, params).await
-    }
+    // ── Relate: starting from a note you already have ───────────────
 
     #[tool(
         name = "note_related",
-        description = "Find notes about the same subject as a given note, seeded from that note's own embedding (no query string needed). Returns semantically nearest notes ranked by similarity, each flagged with whether it is ALREADY linked to the subject note, plus the note's existing outgoing links and backlinks for comparison. An unlinked high-scoring result is a connection the vault has not recorded yet. Requires semantic search to be enabled."
+        description = "Find notes about the same subject as a note you already have, seeded from that note's own embedding — no query string needed. Use when you have a note and want its neighbours; use search_semantic when you have a question instead of a note. Each result carries `linked`: false means no wikilink joins them yet, which is usually the interesting case — a connection the vault has not recorded. Also returns the note's existing outgoing links and backlinks for comparison. Results carry the same `match_type` / `best_chunk` provenance as search_semantic, with the same caveat about summary matches. Requires semantic search to be enabled."
     )]
     async fn note_related(
         &self,
         Parameters(params): Parameters<related::NoteRelatedParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<Json<related::NoteRelatedResult>, ErrorData> {
         related::note_related(&self.vault, params).await
     }
 
-    // ── Periodic Notes ──────────────────────────────────────────────
-
     #[tool(
-        name = "periodic",
-        description = "Manage periodic notes (daily, weekly, monthly, quarterly, yearly). \
-            Actions: \"get\" — read note content (params: period, date?); \
-            \"create\" — create from template or custom content (params: period, date?, content?); \
-            \"list\" — list recent notes newest-first (params: period, limit?)."
+        name = "note_links",
+        description = "Get both link directions for one note in a single call. Use to see where a note sits in the graph as actually recorded; use note_related for connections by meaning that the graph does not yet capture. Returns `{ path, backlinks, outgoing }` — backlinks being the notes that link TO it with the specific wikilinks involved, outgoing being the links FROM it, each with its resolution status (`resolved_path` is null when the link is broken)."
     )]
-    async fn periodic(
+    async fn note_links(
         &self,
-        Parameters(params): Parameters<periodic::PeriodicParams>,
-    ) -> Result<String, ErrorData> {
-        periodic::periodic(&self.vault, params).await
+        Parameters(params): Parameters<graph::NoteLinksParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        graph::note_links(&self.vault, params).await
     }
 
-    // ── Utility ─────────────────────────────────────────────────────
+    #[tool(
+        name = "vault_broken_links",
+        description = "List wikilinks that point at nothing — vault-wide, or within one note if `path` is given. Use to find typos and links left dangling by a rename. Returns each broken link with its source note, the raw link text, and the unresolved target."
+    )]
+    async fn vault_broken_links(
+        &self,
+        Parameters(params): Parameters<graph::VaultBrokenLinksParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        graph::vault_broken_links(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "vault_orphans",
+        description = "List notes disconnected from the resolvable link graph. Use to find notes nothing points to. Returns each note with a `status` distinguishing \"no_links\" (nothing in either direction) from \"broken_outgoing_only\" (it links out, but every one of those links is broken), plus the broken targets involved."
+    )]
+    async fn vault_orphans(
+        &self,
+        Parameters(params): Parameters<graph::VaultOrphansParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        graph::vault_orphans(&self.vault, params).await
+    }
+
+    // ── Read ────────────────────────────────────────────────────────
+
+    #[tool(
+        name = "note_read",
+        description = "Read one note's full content as raw markdown, frontmatter included. Use when you know the path and need the text. Use note_read_many for several notes at once, or note_metadata when you only need its tags, headings and links rather than its body."
+    )]
+    async fn note_read(
+        &self,
+        Parameters(params): Parameters<notes::NoteReadParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_read(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_read_many",
+        description = "Read several notes in one bounded call. Use instead of repeated note_read calls. Provide exactly one of `paths` or `dir`; directory reads are non-recursive unless asked otherwise. Inspects at most 100 files and returns at most 262144 combined content bytes — anything left out is listed in `skipped` with a reason, so check that field rather than assuming you received everything. Fall back to note_read for a single deliberately oversized note."
+    )]
+    async fn note_read_many(
+        &self,
+        Parameters(params): Parameters<notes::NoteReadManyParams>,
+    ) -> Result<Json<notes::NoteReadManyOutput>, ErrorData> {
+        notes::note_read_many(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_metadata",
+        description = "Get one note's metadata without its body. Use to judge a note cheaply before deciding whether to read it, or to count its backlinks. Returns title, tags, frontmatter, headings, outgoing links, block references, backlinks count and file stats. Use note_read for the text itself."
+    )]
+    async fn note_metadata(
+        &self,
+        Parameters(params): Parameters<metadata::NoteMetadataParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        metadata::note_metadata(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_frontmatter",
+        description = "Read a note's frontmatter as JSON, or null if it has none. Read-only — use note_frontmatter_edit to change a field."
+    )]
+    async fn note_frontmatter(
+        &self,
+        Parameters(params): Parameters<metadata::NoteFrontmatterParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        metadata::note_frontmatter(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_patch_targets",
+        description = "List the addressable targets in a note: headings with their Markdown level markers (\"## Log\"), block references, and frontmatter field names. Call this before note_patch to learn exactly which `target` values that note will accept, rather than guessing. Returns `{ headings, block_refs, frontmatter_fields }`."
+    )]
+    async fn note_patch_targets(
+        &self,
+        Parameters(params): Parameters<metadata::NotePatchTargetsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        metadata::note_patch_targets(&self.vault, params).await
+    }
+
+    // ── Write: these modify the vault ───────────────────────────────
+
+    #[tool(
+        name = "note_create",
+        description = "Create a new note, with optional content and YAML frontmatter. Parent directories are created automatically. Fails if the note already exists — use note_write to replace one that does."
+    )]
+    async fn note_create(
+        &self,
+        Parameters(params): Parameters<notes::NoteCreateParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_create(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_write",
+        description = "Replace a note's entire content. The note must already exist; use note_create for a new one. This discards whatever is currently there — prefer note_insert to add to a note, or note_patch to change one section of it."
+    )]
+    async fn note_write(
+        &self,
+        Parameters(params): Parameters<notes::NoteWriteParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_write(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_insert",
+        description = "Add content to an existing note without replacing what is there. `position` \"end\" (default) appends; \"beginning\" inserts after the frontmatter, or at the very start if the note has none. Use note_patch instead when you need to land the content inside a specific section."
+    )]
+    async fn note_insert(
+        &self,
+        Parameters(params): Parameters<notes::NoteInsertParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_insert(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_patch",
+        description = "Modify one section of a note, addressed by heading, block reference, or frontmatter field, with `operation` append, prepend or replace. Call note_patch_targets first to learn the valid `target` values for that note; heading targets accept either bare text (\"Log\") or the marker-prefixed form (\"## Log\")."
+    )]
+    async fn note_patch(
+        &self,
+        Parameters(params): Parameters<notes::NotePatchParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_patch(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_frontmatter_edit",
+        description = "Set or remove a single frontmatter field. `action` is \"set\" (upsert, requires `value`) or \"remove\". Pass arrays and objects as real JSON, not as encoded strings. Reading frontmatter is a separate tool, note_frontmatter."
+    )]
+    async fn note_frontmatter_edit(
+        &self,
+        Parameters(params): Parameters<metadata::NoteFrontmatterEditParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        metadata::note_frontmatter_edit(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_move",
+        description = "Move or rename a note. Destination parent directories are created automatically. Wikilinks in other notes are NOT rewritten, so a rename can leave links pointing at the old name — run vault_broken_links afterwards to find any this breaks."
+    )]
+    async fn note_move(
+        &self,
+        Parameters(params): Parameters<notes::NoteMoveParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_move(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "note_delete",
+        description = "Delete a note from the vault. Requires `confirm: true`, so that a call made by mistake fails instead of destroying a note. This is irreversible and there is no undo."
+    )]
+    async fn note_delete(
+        &self,
+        Parameters(params): Parameters<notes::NoteDeleteParams>,
+    ) -> Result<String, ErrorData> {
+        notes::note_delete(&self.vault, params).await
+    }
+
+    // ── Periodic notes ──────────────────────────────────────────────
+
+    #[tool(
+        name = "periodic_get",
+        description = "Read the periodic note for a date — daily, weekly, monthly, quarterly or yearly. `date` defaults to today. Read-only: if the note does not exist this returns an error rather than creating it. Use periodic_create to make one."
+    )]
+    async fn periodic_get(
+        &self,
+        Parameters(params): Parameters<periodic::PeriodicGetParams>,
+    ) -> Result<String, ErrorData> {
+        periodic::periodic_get(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "periodic_list",
+        description = "List recent periodic notes of one period, newest first. Use to find which dates actually have notes before reading them. `limit` defaults to 10. Returns a path and date for each."
+    )]
+    async fn periodic_list(
+        &self,
+        Parameters(params): Parameters<periodic::PeriodicListParams>,
+    ) -> Result<String, ErrorData> {
+        periodic::periodic_list(&self.vault, params).await
+    }
+
+    #[tool(
+        name = "periodic_create",
+        description = "Create the periodic note for a date, expanded from its configured template or from `content` if you supply it. `date` defaults to today. This writes to the vault."
+    )]
+    async fn periodic_create(
+        &self,
+        Parameters(params): Parameters<periodic::PeriodicCreateParams>,
+    ) -> Result<String, ErrorData> {
+        periodic::periodic_create(&self.vault, params).await
+    }
+
+    // ── Vault ───────────────────────────────────────────────────────
+
+    #[tool(
+        name = "vault_list",
+        description = "List files and directories. Use to explore how the vault is organised when you do not yet know what exists; use the search tools once you know what you are looking for. Supports recursive listing, glob filtering, and a tree view. Returns an array of paths, or objects with title, tags, size and timestamps when `include_metadata` is true; `format: \"tree\"` returns a formatted string instead."
+    )]
+    async fn vault_list(
+        &self,
+        Parameters(params): Parameters<navigation::VaultListParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        navigation::vault_list(&self.vault, params)
+    }
 
     #[tool(
         name = "vault_info",
-        description = "Return aggregate vault statistics: total notes, files, tags, links, and vault size in bytes."
+        description = "Aggregate statistics for the whole vault: total notes, files, tags, links and size in bytes. Use to gauge scale before a broad operation, or to confirm which vault you are connected to."
     )]
     async fn vault_info(
         &self,
@@ -362,9 +438,11 @@ impl ObsidianMcp {
         utility::vault_info(&self.vault, params).await
     }
 
+    // ── Utility ─────────────────────────────────────────────────────
+
     #[tool(
         name = "open_in_obsidian",
-        description = "Open a note in the Obsidian desktop app via the obsidian:// URI scheme. Requires Obsidian to be installed."
+        description = "Open a note in the Obsidian desktop app via the obsidian:// URI scheme. This acts on the user's machine rather than reading the vault, and requires Obsidian to be installed."
     )]
     async fn open_in_obsidian(
         &self,
@@ -389,8 +467,28 @@ impl ServerHandler for ObsidianMcp {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Obsidian vault MCP server. Provides tools to read, write, search, \
-                 and navigate your Obsidian notes via direct filesystem access.",
+                "Obsidian vault over direct filesystem access, with chunk-level \
+                 semantic retrieval alongside the wikilink graph.\n\
+                 \n\
+                 Choosing a search tool is the decision that matters most:\n\
+                 - You know words that appear in the note -> search_text\n\
+                 - You know the idea but not the wording -> search_semantic\n\
+                 - You need a structural pattern -> search_regex\n\
+                 - You are filtering by a label or YAML property -> search_tags, \
+                 search_frontmatter\n\
+                 - You already have a note and want its neighbours -> note_related \
+                 (by meaning) or note_links (by recorded wikilink)\n\
+                 \n\
+                 Semantic results carry their own provenance. `match_type` says \
+                 why a note ranked: \"chunk\" means one passage matched, \"summary\" \
+                 means the note's overall gist did. `best_chunk` is always present, \
+                 but on a summary match it is merely the closest passage and did \
+                 not cause the ranking - do not report it as the reason.\n\
+                 \n\
+                 Not every tool listed here is always available: the server can be \
+                 started with a restricted tool set, in which case the hidden tools \
+                 are absent from tools/list rather than failing when called. Work \
+                 from the list you were given.",
             )
     }
 }
@@ -661,7 +759,7 @@ mod tests {
 
         let dynamic_types =
             serde_json::json!(["array", "boolean", "null", "number", "object", "string"]);
-        for tool_name in ["frontmatter", "search_metadata"] {
+        for tool_name in ["note_frontmatter_edit", "search_frontmatter"] {
             let schema = input_schema(tool_name);
             assert_eq!(
                 schema.pointer("/properties/value/type"),
@@ -674,6 +772,47 @@ mod tests {
                     .is_some_and(|required| required.contains(&serde_json::json!("value"))),
                 "'value' must remain optional for '{tool_name}'"
             );
+        }
+    }
+
+    /// The retrieval tools publish an output schema so a client can learn what
+    /// `match_type` and `best_chunk` mean without being told out of band.
+    ///
+    /// This also pins the shape: MCP requires an object-rooted `outputSchema`,
+    /// and returning the ranked list bare produced an array root, which the
+    /// macro rejects at runtime — a panic on first call rather than a compile
+    /// error, so nothing but a test catches it.
+    #[tokio::test]
+    async fn retrieval_tools_publish_object_rooted_output_schemas() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_vault(tmp.path());
+        let vault = Vault::open(&test_config(tmp.path())).await.unwrap();
+        let server = ObsidianMcp::new(vault, 0.25, test_runtime(), HashSet::new());
+
+        for name in ["search_semantic", "note_related"] {
+            let tool = server
+                .tool_router
+                .get(name)
+                .unwrap_or_else(|| panic!("missing tool '{name}'"));
+            let schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("'{name}' publishes no output schema"));
+            let schema = serde_json::Value::Object(schema.as_ref().clone());
+
+            assert_eq!(
+                schema.pointer("/type"),
+                Some(&serde_json::json!("object")),
+                "'{name}' output schema must be rooted at an object"
+            );
+
+            let rendered = schema.to_string();
+            for field in ["match_type", "best_chunk"] {
+                assert!(
+                    rendered.contains(field),
+                    "'{name}' output schema does not describe '{field}'"
+                );
+            }
         }
     }
 

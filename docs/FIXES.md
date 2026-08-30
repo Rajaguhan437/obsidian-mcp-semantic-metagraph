@@ -166,6 +166,76 @@ field-level tests still pass — verified by reverting the attribute and re-runn
 Inherited from upstream, which carries the same bare `#[tool_handler]` and the
 same `OBSIDIAN_TOOLS` option.
 
+## 10b. The `read` profile admitted tools that write
+
+Fixing enforcement made this one reachable, and it is the more interesting bug
+of the two: the filter worked exactly as designed, and the design was wrong.
+
+`OBSIDIAN_TOOLS` matches tool **names**. Two tools multiplexed reading and
+writing behind an `action` parameter, so no name-based filter could separate
+their halves:
+
+| tool | actions | in `read`? | consequence |
+|---|---|---|---|
+| `frontmatter` | get · **set · remove** | yes | a read-only server would rewrite frontmatter |
+| `periodic` | get · list · **create** | no | blocking one write cost two reads |
+
+Confirmed against a running server started with `OBSIDIAN_TOOLS=read`:
+
+```
+tools/call frontmatter {"path":"…","action":"set","key":"probe","value":"x"}
+  → -32002  "Note not found: …"      ← a vault-layer answer: it executed
+```
+
+**Fix:** split both into single-purpose tools — `note_frontmatter` /
+`note_frontmatter_edit`, and `periodic_get` / `periodic_list` /
+`periodic_create`. `read` is now genuinely read-only *and* regains periodic
+reads it had been denied. The same pass split `note_inspect` (metadata vs patch
+targets) and `search_metadata` (tags vs frontmatter) for legibility, though
+neither of those mixed reads with writes.
+
+**Invariant, not vigilance.** `read_profile_admits_nothing_that_can_write`
+checks `PROFILE_READ` against a hand-maintained `MUTATING_TOOLS` list, and
+`every_profile_entry_is_a_real_tool` catches a name that no longer exists —
+which would otherwise widen a profile silently, since `disabled_tools` ignores
+unknown names. Adding a tool now forces a decision about which side of the line
+it sits on.
+
+## 10c. The daemon ignored exclusion patterns entirely
+
+`OBSIDIAN_EXCLUDE_PATHS` and the vault's `ignore` file were applied by
+`Vault::open` — and by nothing in the daemon. `VaultContext::open` built its
+index with a hardcoded empty set:
+
+```rust
+VaultIndex::build(&vault_root, Arc::new(ExcludeSet::build(vec![])?)).await?
+```
+
+Under the default `OBSIDIAN_SEMANTIC_MODE=auto` the daemon answers semantic
+queries while the server answers lexical ones, so the two disagreed about what
+the vault contains: `search_text` correctly omitted excluded folders and
+`search_semantic` kept returning them. On a vault configured to exclude seven
+folders, the server indexed 476 notes and the daemon indexed 507.
+
+Nothing reported an error. The symptom was a semantic result from a folder the
+user had excluded — which reads as a retrieval quirk, not a configuration bug,
+and is only obvious if you happen to know the folder should not be there.
+
+**Fix:** the daemon resolves the same two sources the server does, and holds the
+resulting set on `VaultContext`.
+
+The watcher had the same hardcoded empty set, in both its `has_embeddings` and
+non-embeddings arms — so even a correctly-excluded index would have re-admitted
+an excluded note on the first edit inside one of those folders. It now filters
+with the stored set.
+
+**Tests:** `exclusion_patterns_read_the_vault_ignore_file` and
+`exclusion_patterns_are_empty_for_a_vault_without_an_ignore_file`. The env-var
+source is not unit-tested on purpose — `set_var` is unsafe in this edition and
+the variable is process-global, so a test that set it would race
+`Config::load` on another thread. The daemon logs `daemon path exclusion active`
+with its resolved patterns instead, which is what to check on a live server.
+
 ## 11. Self-updater removed
 
 `src/upgrade/` was 3,061 lines of launchd/systemd/cargo-install machinery that

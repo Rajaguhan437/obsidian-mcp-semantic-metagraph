@@ -296,19 +296,38 @@ and that is the one failure mode that resembles success.
 
 ## Tools
 
-20 tools. Reference: [docs/TOOLS.md](docs/TOOLS.md).
+27 tools. Full reference: [docs/TOOLS.md](docs/TOOLS.md).
 
-**Search** — `search_semantic` · `search_text` · `search_regex` · `search_metadata`
+**Search** — `search_semantic` · `search_text` · `search_regex` · `search_tags` · `search_frontmatter`
 
-**Relate** — `note_related` (nearest notes by meaning, each flagged linked or not)
+**Relate** — `note_related` (nearest by meaning, each flagged linked or not) · `note_links` (both directions at once) · `vault_broken_links` · `vault_orphans`
 
-**Graph** — `wikilinks` (backlinks / outgoing / broken / orphans)
+**Read** — `note_read` · `note_read_many` · `note_metadata` · `note_frontmatter` · `note_patch_targets`
 
-**Read** — `note_read` · `note_read_many` · `note_inspect` · `frontmatter`
+**Write** — `note_create` · `note_write` · `note_insert` · `note_patch` · `note_frontmatter_edit` · `note_move` · `note_delete`
 
-**Write** — `note_create` · `note_write` · `note_insert` · `note_patch` · `note_move` · `note_delete`
+**Periodic** — `periodic_get` · `periodic_list` · `periodic_create`
 
-**Navigate** — `vault_list` · `vault_info` · `periodic` · `open_in_obsidian`
+**Vault** — `vault_list` · `vault_info` · `open_in_obsidian`
+
+Two rules shape that list, and both exist because an agent — not a person — is
+reading it.
+
+**One tool does one thing.** No tool multiplexes behaviours behind an `action`
+or `type` parameter. That is partly legibility, since a tool whose return shape
+depends on an argument is hard to reason about, and partly correctness:
+`OBSIDIAN_TOOLS` filters by tool *name*, so a tool that both reads and writes
+cannot be filtered — admitting it for its read half admits its write half. That
+is not hypothetical. `frontmatter` bundled get/set/remove and sat in the `read`
+profile, which meant a "read-only" server would happily rewrite a note's
+frontmatter; `periodic` bundled get/list/create, so excluding one write cost you
+both reads. A test now asserts the `read` profile contains nothing that can
+write.
+
+**Descriptions say when, not just what.** Each one names the sibling to prefer
+in the cases it does not cover, because with five ways to search a vault, the
+choice is most of the work and a wrong pick returns an empty result rather than
+an error. The server's own instructions carry the same decision procedure.
 
 ## Graph capabilities
 
@@ -433,6 +452,8 @@ and 8,263 chunks; 133 MB peak.](docs/images/engineering.png)
 | Semantic score exceeding `[0,1]` after weighting | unbalanced both hybrid blends; `alpha` stopped meaning what it says |
 | Cache-load errors swallowed by `.ok()` | a rejected cache silently re-embedded everything |
 | `OBSIDIAN_TOOLS` never enforced | **a read-only server still executed every write tool** |
+| `read` profile admitted tools that write | **`frontmatter` set/remove reachable on a read-only server** |
+| Daemon ignored `OBSIDIAN_EXCLUDE_PATHS` | excluded folders absent from `search_text`, still returned by `search_semantic` |
 | Self-updater reinstalling the upstream package | removed — 3,257 lines |
 
 > The tool-filter fix is worth spelling out, because the failure was silent and
@@ -448,6 +469,16 @@ and 8,263 chunks; 133 MB peak.](docs/images/engineering.png)
 > `server.tool_router` — the field, which really was disabled — rather than on
 > what a client is served. The regression tests added here drive the wire
 > protocol instead, and fail without the fix.
+>
+> Fixing enforcement then exposed a second hole underneath it. `OBSIDIAN_TOOLS`
+> matches on tool *names*, but two tools multiplexed reading and writing behind
+> an `action` parameter, so a name-based filter could not separate them.
+> `frontmatter` (get/set/remove) was in the `read` profile, which meant a
+> read-only server would still rewrite a note's frontmatter on request;
+> `periodic` (get/list/create) was excluded entirely, so blocking one write cost
+> two reads. Both are now split into single-purpose tools, and
+> `read_profile_admits_nothing_that_can_write` asserts the invariant that makes
+> the filter meaningful.
 
 Each has a regression test. Detail: [docs/FIXES.md](docs/FIXES.md).
 

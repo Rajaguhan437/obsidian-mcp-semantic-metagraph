@@ -15,7 +15,7 @@
 //! still knows nothing about embeddings and vice versa — both are reached
 //! through `Vault`.
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::handler::server::wrapper::Json;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -42,7 +42,7 @@ pub struct NoteRelatedParams {
 }
 
 #[derive(serde::Serialize, JsonSchema)]
-struct RelatedNote {
+pub struct RelatedNote {
     path: std::path::PathBuf,
     title: String,
     /// Same ranking score `search_semantic` reports. Not a cosine: a weighted
@@ -60,7 +60,7 @@ struct RelatedNote {
 }
 
 #[derive(serde::Serialize, JsonSchema)]
-struct LinkedNeighbours {
+pub struct LinkedNeighbours {
     /// Notes this note links to, resolved.
     outgoing: Vec<std::path::PathBuf>,
     /// Notes that link to this note.
@@ -68,7 +68,7 @@ struct LinkedNeighbours {
 }
 
 #[derive(serde::Serialize, JsonSchema)]
-struct NoteRelatedResult {
+pub struct NoteRelatedResult {
     path: std::path::PathBuf,
     title: String,
     /// Semantically nearest notes, most similar first.
@@ -83,11 +83,11 @@ struct NoteRelatedResult {
 pub async fn note_related(
     vault: &Vault,
     params: NoteRelatedParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    let result = note_related_inner(vault, params)?;
-    let json = serde_json::to_string_pretty(&result)
-        .map_err(|e| VaultError::Other(format!("JSON serialization failed: {e}")))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+) -> Result<Json<NoteRelatedResult>, rmcp::ErrorData> {
+    // See the note in `search::search_semantic`: returning `Json` publishes an
+    // output schema, which is what makes `linked` and the provenance fields
+    // legible to a client instead of arriving as undocumented JSON text.
+    Ok(Json(note_related_inner(vault, params)?))
 }
 
 #[cfg(has_embeddings)]

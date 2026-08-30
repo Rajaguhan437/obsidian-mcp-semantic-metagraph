@@ -18,65 +18,89 @@ fn parse_date(date_str: &str) -> Result<NaiveDate, rmcp::ErrorData> {
     })
 }
 
+/// Parameters for the `periodic_get` tool.
 #[derive(Deserialize, JsonSchema, Default)]
-pub struct PeriodicParams {
-    /// Action to perform: `"get"` (read note content), `"create"` (create from template or custom content), or `"list"` (list recent notes).
-    pub action: String,
+pub struct PeriodicGetParams {
     /// Period type: daily, weekly, monthly, quarterly, yearly.
     pub period: NotePeriod,
-    /// ISO date (YYYY-MM-DD). Defaults to today. Used by `"get"` and `"create"`.
+    /// ISO date (YYYY-MM-DD). Defaults to today.
     #[serde(default)]
     pub date: Option<String>,
-    /// Custom content; overrides template expansion. Only used by `"create"`.
-    #[serde(default)]
-    pub content: Option<String>,
-    /// Maximum number of notes to return (default: 10). Only used by `"list"`.
+}
+
+/// Parameters for the `periodic_list` tool.
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct PeriodicListParams {
+    /// Period type: daily, weekly, monthly, quarterly, yearly.
+    pub period: NotePeriod,
+    /// Maximum number of notes to return (default: 10).
     #[serde(default)]
     pub limit: Option<usize>,
 }
 
-pub async fn periodic(vault: &Vault, params: PeriodicParams) -> Result<String, rmcp::ErrorData> {
-    match params.action.to_ascii_lowercase().as_str() {
-        "get" => {
-            let date = params.date.map(|s| parse_date(&s)).transpose()?;
-            Ok(vault.get_periodic_note(&params.period, date)?)
-        }
-        "create" => {
-            let date = params.date.map(|s| parse_date(&s)).transpose()?;
-            let path =
-                vault.create_periodic_note(&params.period, date, params.content.as_deref())?;
-            Ok(format!("Created: {}", path.display()))
-        }
-        "list" => {
-            let limit = params.limit.unwrap_or(10);
-            let paths = vault.list_recent_periodic_notes(&params.period, limit)?;
+/// Parameters for the `periodic_create` tool.
+///
+/// Creation is a separate tool from the two read operations because
+/// `OBSIDIAN_TOOLS` filters by tool name: while all three shared one name, a
+/// read-only profile had to exclude the reads in order to exclude the write.
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct PeriodicCreateParams {
+    /// Period type: daily, weekly, monthly, quarterly, yearly.
+    pub period: NotePeriod,
+    /// ISO date (YYYY-MM-DD). Defaults to today.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// Custom content; overrides template expansion.
+    #[serde(default)]
+    pub content: Option<String>,
+}
 
-            let items: Vec<serde_json::Value> = paths
-                .into_iter()
-                .map(|p| {
-                    let date = p
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    serde_json::json!({ "path": p.to_string_lossy(), "date": date })
-                })
-                .collect();
+/// Read the periodic note for a date.
+pub async fn periodic_get(
+    vault: &Vault,
+    params: PeriodicGetParams,
+) -> Result<String, rmcp::ErrorData> {
+    let date = params.date.map(|s| parse_date(&s)).transpose()?;
+    Ok(vault.get_periodic_note(&params.period, date)?)
+}
 
-            serde_json::to_string_pretty(&items).map_err(|e| {
-                rmcp::ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    e.to_string(),
-                    None::<serde_json::Value>,
-                )
-            })
-        }
-        other => Err(rmcp::ErrorData::new(
-            ErrorCode::INVALID_PARAMS,
-            format!("Unknown action '{other}'. Valid values: \"get\", \"create\", \"list\""),
+/// List recent periodic notes, newest first.
+pub async fn periodic_list(
+    vault: &Vault,
+    params: PeriodicListParams,
+) -> Result<String, rmcp::ErrorData> {
+    let limit = params.limit.unwrap_or(10);
+    let paths = vault.list_recent_periodic_notes(&params.period, limit)?;
+
+    let items: Vec<serde_json::Value> = paths
+        .into_iter()
+        .map(|p| {
+            let date = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            serde_json::json!({ "path": p.to_string_lossy(), "date": date })
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&items).map_err(|e| {
+        rmcp::ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            e.to_string(),
             None::<serde_json::Value>,
-        )),
-    }
+        )
+    })
+}
+
+/// Create the periodic note for a date, from template or custom content.
+pub async fn periodic_create(
+    vault: &Vault,
+    params: PeriodicCreateParams,
+) -> Result<String, rmcp::ErrorData> {
+    let date = params.date.map(|s| parse_date(&s)).transpose()?;
+    let path = vault.create_periodic_note(&params.period, date, params.content.as_deref())?;
+    Ok(format!("Created: {}", path.display()))
 }
 
 #[cfg(test)]
@@ -98,51 +122,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_action_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        setup_daily_config(dir.path());
-        let vault = Vault::open(&test_config(dir.path())).await.unwrap();
-
-        let result = periodic(
-            &vault,
-            PeriodicParams {
-                action: "destroy".into(),
-                ..Default::default()
-            },
-        )
-        .await;
-        let err = result.unwrap_err();
-        assert!(err.message.contains("Unknown action"));
-        assert!(err.message.contains("destroy"));
-    }
-
-    #[tokio::test]
-    async fn action_is_case_insensitive() {
-        let dir = tempfile::tempdir().unwrap();
-        setup_daily_config(dir.path());
-        let vault = Vault::open(&test_config(dir.path())).await.unwrap();
-
-        let result = periodic(
-            &vault,
-            PeriodicParams {
-                action: "LIST".into(),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn list_returns_empty_array() {
         let dir = tempfile::tempdir().unwrap();
         setup_daily_config(dir.path());
         let vault = Vault::open(&test_config(dir.path())).await.unwrap();
 
-        let result = periodic(
+        let result = periodic_list(
             &vault,
-            PeriodicParams {
-                action: "list".into(),
+            PeriodicListParams {
                 limit: Some(5),
                 ..Default::default()
             },
@@ -159,10 +146,9 @@ mod tests {
         setup_daily_config(dir.path());
         let vault = Vault::open(&test_config(dir.path())).await.unwrap();
 
-        let msg = periodic(
+        let msg = periodic_create(
             &vault,
-            PeriodicParams {
-                action: "create".into(),
+            PeriodicCreateParams {
                 date: Some("2026-01-15".into()),
                 content: Some("hello periodic".into()),
                 ..Default::default()
@@ -172,10 +158,9 @@ mod tests {
         .unwrap();
         assert!(msg.contains("Created"));
 
-        let content = periodic(
+        let content = periodic_get(
             &vault,
-            PeriodicParams {
-                action: "get".into(),
+            PeriodicGetParams {
                 date: Some("2026-01-15".into()),
                 ..Default::default()
             },
@@ -183,5 +168,50 @@ mod tests {
         .await
         .unwrap();
         assert!(content.contains("hello periodic"));
+    }
+
+    /// Reading and creating are separate tools so a read-only profile can keep
+    /// the reads. While all three shared one name, excluding the write meant
+    /// excluding `get` and `list` too.
+    #[tokio::test]
+    async fn reads_do_not_create_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_daily_config(dir.path());
+        let vault = Vault::open(&test_config(dir.path())).await.unwrap();
+
+        let before = fs::read_dir(dir.path().join("Daily")).unwrap().count();
+
+        let _ = periodic_get(
+            &vault,
+            PeriodicGetParams {
+                date: Some("2026-03-09".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = periodic_list(&vault, PeriodicListParams::default()).await;
+
+        assert_eq!(
+            before,
+            fs::read_dir(dir.path().join("Daily")).unwrap().count(),
+            "periodic reads must not write to the vault"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_an_unparseable_date() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_daily_config(dir.path());
+        let vault = Vault::open(&test_config(dir.path())).await.unwrap();
+
+        let result = periodic_create(
+            &vault,
+            PeriodicCreateParams {
+                date: Some("15-01-2026".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().message.contains("Invalid date"));
     }
 }

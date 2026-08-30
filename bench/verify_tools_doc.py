@@ -1,6 +1,10 @@
 """Check docs/TOOLS.md against the source it claims to be extracted from."""
 import io, os, re, glob, sys
-os.chdir(r"D:\obsidian-mcp-fork")
+
+# Repo root is the parent of bench/. Deriving it beats hardcoding: this script
+# already outlived one move of the checkout, and a stale absolute path fails in
+# a way that looks like a missing file rather than a wrong assumption.
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 doc = io.open("docs/TOOLS.md", encoding="utf-8").read()
 mod = io.open("src/tools/mod.rs", encoding="utf-8").read()

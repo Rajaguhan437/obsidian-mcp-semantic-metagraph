@@ -1,5 +1,6 @@
 //! Text, regex, tag, and frontmatter search tools across vault notes.
 
+use rmcp::handler::server::wrapper::Json;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -143,23 +144,73 @@ pub struct SearchMetadataParams {
     pub operator: Option<FrontmatterOperator>,
 }
 
-pub async fn search_metadata(
-    vault: &Vault,
-    params: SearchMetadataParams,
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    let search_type = params.search_type.as_str();
+/// Parameters for the `search_tags` tool.
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SearchTagsParams {
+    /// Tag to search for, without the `#` prefix.
+    pub tag: String,
+    /// Also match nested tags, so `inbox` matches `inbox/read`. Default: true.
+    #[serde(default)]
+    pub include_nested: Option<bool>,
+}
 
-    if search_type.eq_ignore_ascii_case("tag") {
-        search_metadata_tag(vault, &params)
-    } else if search_type.eq_ignore_ascii_case("frontmatter") {
-        search_metadata_frontmatter(vault, &params)
-    } else {
-        Err(rmcp::ErrorData::new(
-            ErrorCode::INVALID_PARAMS,
-            format!("Unknown type '{search_type}'. Valid values: \"tag\", \"frontmatter\""),
-            None::<serde_json::Value>,
-        ))
-    }
+/// Parameters for the `search_frontmatter` tool.
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SearchFrontmatterParams {
+    /// Frontmatter field name to query.
+    pub field: String,
+    /// Comparison operator. Default: `eq`.
+    #[serde(default)]
+    pub operator: Option<FrontmatterOperator>,
+    /// Value to compare against. Required for `eq` and `contains`, ignored for
+    /// `exists`. Pass arrays and objects directly; a JSON-encoded string is
+    /// compared as a literal string.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::deserialize_optional_json_value"
+    )]
+    #[schemars(schema_with = "crate::tools::json_value_schema")]
+    pub value: Option<serde_json::Value>,
+}
+
+/// Find notes carrying a tag.
+///
+/// Split from frontmatter search so each tool takes only the parameters it
+/// actually uses. The combined form had six, of which any one call used two or
+/// three, and a client had to infer which from a `type` discriminator.
+pub async fn search_tags(
+    vault: &Vault,
+    params: SearchTagsParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    search_metadata_tag(
+        vault,
+        &SearchMetadataParams {
+            search_type: "tag".into(),
+            tag: Some(params.tag),
+            include_nested: params.include_nested,
+            field: None,
+            value: None,
+            operator: None,
+        },
+    )
+}
+
+/// Find notes by the value of a frontmatter field.
+pub async fn search_frontmatter(
+    vault: &Vault,
+    params: SearchFrontmatterParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    search_metadata_frontmatter(
+        vault,
+        &SearchMetadataParams {
+            search_type: "frontmatter".into(),
+            tag: None,
+            include_nested: None,
+            field: Some(params.field),
+            value: params.value,
+            operator: params.operator,
+        },
+    )
 }
 
 fn search_metadata_tag(
@@ -262,8 +313,19 @@ pub struct SearchSemanticParams {
     pub alpha: Option<f32>,
 }
 
+/// Envelope for semantic results.
+///
+/// The MCP specification requires a tool's `outputSchema` to be rooted at an
+/// object, so the ranked list cannot be returned bare. Naming the field also
+/// leaves room to add sibling fields later without breaking clients.
 #[derive(serde::Serialize, JsonSchema)]
-struct SemanticSearchResult {
+pub struct SemanticSearchOutput {
+    /// Matching notes, most similar first.
+    pub results: Vec<SemanticSearchResult>,
+}
+
+#[derive(serde::Serialize, JsonSchema)]
+pub struct SemanticSearchResult {
     path: std::path::PathBuf,
     title: String,
     pub(crate) score: f32,
@@ -325,7 +387,7 @@ pub async fn search_semantic(
     params: SearchSemanticParams,
     default_alpha: f32,
     runtime: &SemanticRuntime,
-) -> Result<CallToolResult, rmcp::ErrorData> {
+) -> Result<Json<SemanticSearchOutput>, rmcp::ErrorData> {
     let top_k = params.top_k.unwrap_or(10).min(MAX_RESULTS_CAP);
     let include_content = params.include_content.unwrap_or(false);
     let lexical_prefetch = params.lexical_prefetch.unwrap_or(false);
@@ -383,9 +445,11 @@ pub async fn search_semantic(
     }
     .map_err(to_semantic_tool_error)?;
 
-    let json = serde_json::to_string_pretty(&results)
-        .map_err(|e| VaultError::Other(format!("JSON serialization failed: {e}")))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    // `Json` rather than a hand-built text result: it carries structured
+    // content AND lets the macro publish an output schema, which is how the
+    // `match_type` / `best_chunk` distinction becomes visible to a client at
+    // all. Documented on the struct's fields, it reaches the agent verbatim.
+    Ok(Json(SemanticSearchOutput { results }))
 }
 
 fn semantic_candidate_limit(top_k: usize) -> usize {
@@ -1248,18 +1312,16 @@ mod tests {
         assert!(parsed.len() <= 2);
     }
 
-    // ── search_metadata (tag) ──────────────────────────────────────
+    // ── search_tags ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn search_metadata_tag_exact() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_tags(
             &vault,
-            SearchMetadataParams {
-                search_type: "tag".into(),
-                tag: Some("inbox".into()),
+            SearchTagsParams {
+                tag: "inbox".into(),
                 include_nested: Some(false),
-                ..Default::default()
             },
         )
         .await
@@ -1274,13 +1336,11 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_tag_include_nested() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_tags(
             &vault,
-            SearchMetadataParams {
-                search_type: "tag".into(),
-                tag: Some("inbox".into()),
+            SearchTagsParams {
+                tag: "inbox".into(),
                 include_nested: Some(true),
-                ..Default::default()
             },
         )
         .await
@@ -1293,13 +1353,11 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_tag_strips_hash_prefix() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_tags(
             &vault,
-            SearchMetadataParams {
-                search_type: "tag".into(),
-                tag: Some("#lang".into()),
+            SearchTagsParams {
+                tag: "#lang".into(),
                 include_nested: Some(false),
-                ..Default::default()
             },
         )
         .await
@@ -1310,34 +1368,17 @@ mod tests {
         assert_eq!(parsed.len(), 2);
     }
 
-    #[tokio::test]
-    async fn search_metadata_tag_missing_tag_errors() {
-        let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
-            &vault,
-            SearchMetadataParams {
-                search_type: "tag".into(),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    // ── search_metadata (frontmatter) ───────────────────────────────
+    // ── search_frontmatter ──────────────────────────────────────────
 
     #[tokio::test]
     async fn search_metadata_frontmatter_eq() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_frontmatter(
             &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                field: Some("status".into()),
-                value: Some(serde_json::json!("stable")),
+            SearchFrontmatterParams {
+                field: "status".into(),
                 operator: Some(FrontmatterOperator::Eq),
-                ..Default::default()
+                value: Some(serde_json::json!("stable")),
             },
         )
         .await
@@ -1352,14 +1393,12 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_frontmatter_eq_array_contains() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_frontmatter(
             &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                field: Some("tags".into()),
-                value: Some(serde_json::json!("systems")),
+            SearchFrontmatterParams {
+                field: "tags".into(),
                 operator: Some(FrontmatterOperator::Eq),
-                ..Default::default()
+                value: Some(serde_json::json!("systems")),
             },
         )
         .await
@@ -1372,14 +1411,12 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_frontmatter_contains_substring() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_frontmatter(
             &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                field: Some("status".into()),
-                value: Some(serde_json::json!("progress")),
+            SearchFrontmatterParams {
+                field: "status".into(),
                 operator: Some(FrontmatterOperator::Contains),
-                ..Default::default()
+                value: Some(serde_json::json!("progress")),
             },
         )
         .await
@@ -1394,11 +1431,10 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_frontmatter_exists() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_frontmatter(
             &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                field: Some("status".into()),
+            SearchFrontmatterParams {
+                field: "status".into(),
                 operator: Some(FrontmatterOperator::Exists),
                 ..Default::default()
             },
@@ -1414,11 +1450,10 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_frontmatter_exists_missing_field() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_frontmatter(
             &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                field: Some("nonexistent".into()),
+            SearchFrontmatterParams {
+                field: "nonexistent".into(),
                 operator: Some(FrontmatterOperator::Exists),
                 ..Default::default()
             },
@@ -1434,11 +1469,10 @@ mod tests {
     #[tokio::test]
     async fn search_metadata_frontmatter_eq_without_value_errors() {
         let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
+        let result = search_frontmatter(
             &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                field: Some("status".into()),
+            SearchFrontmatterParams {
+                field: "status".into(),
                 operator: Some(FrontmatterOperator::Eq),
                 ..Default::default()
             },
@@ -1450,15 +1484,13 @@ mod tests {
 
     #[tokio::test]
     async fn search_metadata_preserves_and_matches_explicit_null_value() {
-        let missing: SearchMetadataParams = serde_json::from_value(serde_json::json!({
-            "type": "frontmatter",
+        let missing: SearchFrontmatterParams = serde_json::from_value(serde_json::json!({
             "field": "status"
         }))
         .unwrap();
         assert!(missing.value.is_none());
 
-        let explicit_null: SearchMetadataParams = serde_json::from_value(serde_json::json!({
-            "type": "frontmatter",
+        let explicit_null: SearchFrontmatterParams = serde_json::from_value(serde_json::json!({
             "field": "status",
             "value": null
         }))
@@ -1469,48 +1501,16 @@ mod tests {
         vault
             .set_frontmatter_field(Path::new("rust.md"), "reviewed_at", serde_json::Value::Null)
             .unwrap();
-        let params: SearchMetadataParams = serde_json::from_value(serde_json::json!({
-            "type": "frontmatter",
+        let params: SearchFrontmatterParams = serde_json::from_value(serde_json::json!({
             "field": "reviewed_at",
             "operator": "eq",
             "value": null
         }))
         .unwrap();
-        let result = search_metadata(&vault, params).await.unwrap();
+        let result = search_frontmatter(&vault, params).await.unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(extract_text(&result)).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["path"], "rust.md");
-    }
-
-    #[tokio::test]
-    async fn search_metadata_frontmatter_missing_field_errors() {
-        let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
-            &vault,
-            SearchMetadataParams {
-                search_type: "frontmatter".into(),
-                value: Some(serde_json::json!("test")),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn search_metadata_invalid_type_errors() {
-        let (_dir, vault) = setup_search_vault().await;
-        let result = search_metadata(
-            &vault,
-            SearchMetadataParams {
-                search_type: "invalid".into(),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
     }
 
     // ── search_text with Tantivy BM25 ──────────────────────────────
@@ -1704,8 +1704,7 @@ mod tests {
         )
         .await
         .expect("daemon search should succeed");
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(extract_text(&result)).expect("parse result");
+        let parsed = result.0.results;
         assert!(parsed.is_empty(), "mock daemon returns empty result set");
 
         let captured_prefetch = server.await.expect("server join");
@@ -1749,10 +1748,9 @@ mod tests {
         )
         .await
         .expect("daemon search should succeed");
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(extract_text(&result)).expect("parse result");
+        let parsed = result.0.results;
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["path"], "rust.md");
+        assert_eq!(parsed[0].path, std::path::PathBuf::from("rust.md"));
 
         let captured_top_k = server.await.expect("server join");
         assert_eq!(captured_top_k, semantic_candidate_limit(1));
@@ -1795,10 +1793,9 @@ mod tests {
         )
         .await
         .expect("daemon search should succeed");
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(extract_text(&result)).expect("parse result");
+        let parsed = result.0.results;
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["path"], "rust.md");
+        assert_eq!(parsed[0].path, std::path::PathBuf::from("rust.md"));
 
         let captured_top_k = server.await.expect("server join");
         assert_eq!(captured_top_k, semantic_candidate_limit(1));
@@ -1900,7 +1897,8 @@ mod tests {
             &runtime,
         )
         .await
-        .expect_err("local backend failure should surface after daemon fallback");
+        .err()
+        .expect("local backend failure should surface after daemon fallback");
 
         assert!(
             !error.message.contains("semantic daemon is offline"),

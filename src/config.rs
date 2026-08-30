@@ -82,59 +82,95 @@ pub struct Config {
 
 // ── Tool Filtering ─────────────────────────────────────────────────
 
+/// Every tool the server can expose, grouped as the tools themselves are.
+///
+/// **No entry here mixes reading and writing.** That is a hard requirement, not
+/// a stylistic one: `OBSIDIAN_TOOLS` filters by tool *name*, so a tool that
+/// multiplexes both behind an `action` parameter cannot be filtered — admitting
+/// it for its read action admits its write action too. `frontmatter` (get/set/
+/// remove) and `periodic` (get/list/create) did exactly that, which silently
+/// made the `read` profile writable and forced `read` to drop periodic reads to
+/// exclude one write. Both are now split. Keep it that way when adding tools.
 pub const ALL_TOOL_NAMES: &[&str] = &[
-    "vault_list",
+    // search — finding notes you cannot name
+    "search_semantic",
+    "search_text",
+    "search_regex",
+    "search_tags",
+    "search_frontmatter",
+    // relate — starting from a note you have
+    "note_related",
+    "note_links",
+    "vault_broken_links",
+    "vault_orphans",
+    // read
     "note_read",
     "note_read_many",
+    "note_metadata",
+    "note_frontmatter",
+    "note_patch_targets",
+    // write
     "note_create",
     "note_write",
     "note_insert",
     "note_patch",
-    "note_delete",
+    "note_frontmatter_edit",
     "note_move",
-    "search_text",
-    "search_regex",
-    "search_metadata",
-    "search_semantic",
-    "note_inspect",
-    "frontmatter",
-    "wikilinks",
-    "note_related",
-    "periodic",
+    "note_delete",
+    // periodic
+    "periodic_get",
+    "periodic_list",
+    "periodic_create",
+    // vault
+    "vault_list",
     "vault_info",
+    // utility
     "open_in_obsidian",
 ];
 
 const PROFILE_CORE: &[&str] = &[
-    "vault_list",
+    "search_text",
+    "search_regex",
+    "search_tags",
+    "search_frontmatter",
     "note_read",
     "note_read_many",
+    "note_metadata",
+    "note_frontmatter",
+    "note_patch_targets",
     "note_create",
     "note_write",
     "note_insert",
     "note_patch",
-    "note_delete",
+    "note_frontmatter_edit",
     "note_move",
-    "search_text",
-    "search_regex",
-    "search_metadata",
-    "note_inspect",
-    "frontmatter",
+    "note_delete",
+    "vault_list",
     "vault_info",
 ];
 
+/// Strictly read-only: nothing here can alter the vault.
+///
+/// `note_patch_targets` is deliberately absent even though it only reads — it
+/// exists solely to prepare a `note_patch`, so it is dead weight without one.
+/// `open_in_obsidian` is absent because it acts on the user's machine.
 const PROFILE_READ: &[&str] = &[
-    "note_read",
-    "note_read_many",
-    "vault_list",
+    "search_semantic",
     "search_text",
     "search_regex",
-    "search_metadata",
-    "search_semantic",
-    "note_inspect",
-    "frontmatter",
-    "wikilinks",
+    "search_tags",
+    "search_frontmatter",
     "note_related",
+    "note_links",
+    "vault_broken_links",
+    "vault_orphans",
+    "note_read",
+    "note_read_many",
+    "note_metadata",
+    "note_frontmatter",
+    "periodic_get",
+    "periodic_list",
+    "vault_list",
     "vault_info",
 ];
 
@@ -701,8 +737,9 @@ mod tests {
         let disabled = filter.disabled_tools();
         assert_eq!(disabled.len(), ALL_TOOL_NAMES.len() - PROFILE_CORE.len());
         assert!(disabled.contains("search_semantic"));
-        assert!(disabled.contains("wikilinks"));
-        assert!(disabled.contains("periodic"));
+        assert!(disabled.contains("note_related"));
+        assert!(disabled.contains("note_links"));
+        assert!(disabled.contains("periodic_create"));
         assert!(disabled.contains("open_in_obsidian"));
         assert!(!disabled.contains("note_read"));
         assert!(!disabled.contains("note_read_many"));
@@ -721,6 +758,68 @@ mod tests {
         assert!(!disabled.contains("search_semantic"));
     }
 
+    /// Every tool that can alter the vault or act on the user's machine.
+    ///
+    /// Maintained by hand, deliberately: adding a tool should force a decision
+    /// about which side of this line it falls on. Getting that wrong once
+    /// already shipped a "read-only" server that would delete notes.
+    const MUTATING_TOOLS: &[&str] = &[
+        "note_create",
+        "note_write",
+        "note_insert",
+        "note_patch",
+        "note_frontmatter_edit",
+        "note_move",
+        "note_delete",
+        "periodic_create",
+        "open_in_obsidian",
+    ];
+
+    #[test]
+    fn read_profile_admits_nothing_that_can_write() {
+        let read: HashSet<&str> = PROFILE_READ.iter().copied().collect();
+
+        for tool in MUTATING_TOOLS {
+            assert!(
+                !read.contains(tool),
+                "'{tool}' can modify the vault but is in the read profile"
+            );
+        }
+    }
+
+    /// A name that appears in a profile but not in `ALL_TOOL_NAMES` is silently
+    /// ignored by `disabled_tools`, so a typo would quietly widen a profile
+    /// with no error raised anywhere.
+    #[test]
+    fn every_profile_entry_is_a_real_tool() {
+        let all: HashSet<&str> = ALL_TOOL_NAMES.iter().copied().collect();
+
+        for (profile, names) in [
+            ("core", PROFILE_CORE),
+            ("read", PROFILE_READ),
+            ("minimal", PROFILE_MINIMAL),
+            ("mutating", MUTATING_TOOLS),
+        ] {
+            for name in names {
+                assert!(
+                    all.contains(name),
+                    "'{profile}' names unknown tool '{name}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_tool_name_is_duplicated() {
+        let mut seen = HashSet::new();
+        for name in ALL_TOOL_NAMES {
+            assert!(
+                seen.insert(name),
+                "'{name}' appears twice in ALL_TOOL_NAMES"
+            );
+        }
+    }
+
     #[test]
     fn tool_filter_profile_minimal() {
         let filter = ToolFilter::parse("minimal").unwrap();
@@ -728,7 +827,7 @@ mod tests {
         let disabled = filter.disabled_tools();
         assert_eq!(disabled.len(), ALL_TOOL_NAMES.len() - PROFILE_MINIMAL.len());
         assert!(disabled.contains("search_regex"));
-        assert!(disabled.contains("wikilinks"));
+        assert!(disabled.contains("note_links"));
         assert!(disabled.contains("note_read_many"));
         assert!(!disabled.contains("note_read"));
         assert!(!disabled.contains("vault_list"));
@@ -770,8 +869,8 @@ mod tests {
 
     #[test]
     fn tool_filter_deny_list() {
-        let filter = ToolFilter::parse("!open_in_obsidian,!wikilinks").unwrap();
-        let expected: HashSet<String> = ["open_in_obsidian", "wikilinks"]
+        let filter = ToolFilter::parse("!open_in_obsidian,!note_links").unwrap();
+        let expected: HashSet<String> = ["open_in_obsidian", "note_links"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -779,7 +878,7 @@ mod tests {
         let disabled = filter.disabled_tools();
         assert_eq!(disabled.len(), 2);
         assert!(disabled.contains("open_in_obsidian"));
-        assert!(disabled.contains("wikilinks"));
+        assert!(disabled.contains("note_links"));
     }
 
     #[test]

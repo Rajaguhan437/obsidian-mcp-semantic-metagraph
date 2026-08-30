@@ -29,9 +29,46 @@ pub struct VaultContext {
     model_name: String,
     index: Arc<RwLock<VaultIndex>>,
     tantivy: Arc<TantivyIndex>,
+    /// Held so the watcher filters incoming changes the same way the initial
+    /// build did. Rebuilding it empty there would quietly re-admit excluded
+    /// notes on the first edit inside an excluded folder.
+    exclude: Arc<ExcludeSet>,
     #[cfg(has_embeddings)]
     embedding_runtime: EmbeddingRuntime,
     watcher: Mutex<Option<Debouncer<notify::RecommendedWatcher>>>,
+}
+
+/// Exclusion patterns for a vault held by the daemon.
+///
+/// This used to be hardcoded empty, which made the daemon's view of a vault
+/// disagree with the server's. Under `OBSIDIAN_SEMANTIC_MODE=auto` the daemon
+/// answers semantic queries while the server answers lexical ones, so excluded
+/// folders were absent from `search_text` and still present in
+/// `search_semantic` — the kind of split-brain that reads as a retrieval
+/// oddity rather than a configuration bug.
+///
+/// The sources are the same two `Vault::open` uses: the vault's `ignore` file
+/// and `OBSIDIAN_EXCLUDE_PATHS`. The daemon inherits its environment from the
+/// server that spawned it, so the two agree by construction.
+///
+/// Caveat worth knowing: a daemon is keyed by vault path alone, so two servers
+/// pointed at one vault with *different* exclusions would share whichever set
+/// was registered first.
+fn exclusion_patterns(vault_root: &Path) -> Vec<String> {
+    let mcp_home = vault_root.join(".obsidian-mcp");
+    let mut patterns = crate::vault::exclude::load_ignore_patterns(&mcp_home, &mcp_home);
+
+    patterns.extend(
+        std::env::var("OBSIDIAN_EXCLUDE_PATHS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|raw| raw.trim().to_string())
+            .filter(|raw| !raw.is_empty()),
+    );
+
+    patterns.sort();
+    patterns.dedup();
+    patterns
 }
 
 impl VaultContext {
@@ -45,8 +82,13 @@ impl VaultContext {
     ) -> VaultResult<Self> {
         std::fs::create_dir_all(&state_dir)?;
 
+        let exclude = Arc::new(ExcludeSet::build(exclusion_patterns(&vault_root))?);
+        if !exclude.is_empty() {
+            tracing::info!(patterns = ?exclude.patterns(), "daemon path exclusion active");
+        }
+
         let index = Arc::new(RwLock::new(
-            VaultIndex::build(&vault_root, Arc::new(ExcludeSet::build(vec![])?)).await?,
+            VaultIndex::build(&vault_root, Arc::clone(&exclude)).await?,
         ));
         let tantivy = {
             let index_guard = index
@@ -83,6 +125,7 @@ impl VaultContext {
             model_name,
             index,
             tantivy,
+            exclude,
             #[cfg(has_embeddings)]
             embedding_runtime,
             watcher: Mutex::new(None),
@@ -131,7 +174,7 @@ impl VaultContext {
             Arc::clone(&self.index),
             Some(Arc::clone(&self.tantivy)),
             self.embedding_runtime.clone(),
-            Arc::new(ExcludeSet::build(vec![])?),
+            Arc::clone(&self.exclude),
         )?;
 
         #[cfg(not(has_embeddings))]
@@ -139,7 +182,7 @@ impl VaultContext {
             self.vault_root.clone(),
             Arc::clone(&self.index),
             Some(Arc::clone(&self.tantivy)),
-            Arc::new(ExcludeSet::build(vec![])?),
+            Arc::clone(&self.exclude),
         )?;
 
         *guard = Some(debouncer);
@@ -246,5 +289,44 @@ impl VaultContext {
         Err(VaultError::Embedding(
             "daemon binary compiled without embeddings feature".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `ignore` file half of `exclusion_patterns`.
+    ///
+    /// The `OBSIDIAN_EXCLUDE_PATHS` half is deliberately not unit-tested here:
+    /// `set_var` is unsafe in this edition and the variable is process-global,
+    /// so a test that sets it would race `config::Config::load` running on
+    /// another thread. Its wiring is covered end-to-end instead — the daemon
+    /// logs `daemon path exclusion active` with the resolved patterns.
+    #[test]
+    fn exclusion_patterns_read_the_vault_ignore_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp_home = dir.path().join(".obsidian-mcp");
+        std::fs::create_dir_all(&mcp_home).unwrap();
+        std::fs::write(
+            mcp_home.join("ignore"),
+            "Archive/\n# comment\n\nDrafts/**\n",
+        )
+        .unwrap();
+
+        let patterns = exclusion_patterns(dir.path());
+
+        assert!(patterns.contains(&"Archive/".to_string()));
+        assert!(patterns.contains(&"Drafts/**".to_string()));
+        assert!(
+            !patterns.iter().any(|p| p.starts_with('#')),
+            "comments must not become patterns"
+        );
+    }
+
+    #[test]
+    fn exclusion_patterns_are_empty_for_a_vault_without_an_ignore_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(exclusion_patterns(dir.path()).is_empty());
     }
 }
