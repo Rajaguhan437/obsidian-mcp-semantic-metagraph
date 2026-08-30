@@ -73,10 +73,10 @@ ranking function:
 
 | | for | tools |
 |---|---|---|
-| **Semantic retrieval** | meaning-based questions, paraphrase, vague recall | `search_semantic` |
-| **Lexical search** | exact strings, identifiers, terminology, regex | `search_text`, `search_regex`, `search_metadata` |
-| **Graph navigation** | relationships between notes | `wikilinks`, `note_inspect`, `frontmatter` |
-| **Note operations** | read, create, edit, move, patch | `note_*`, `vault_*`, `periodic` |
+| **Semantic retrieval** | meaning-based questions, paraphrase, vague recall | `search_semantic`, `note_related` |
+| **Lexical search** | exact strings, identifiers, terminology, regex | `search_text`, `search_regex`, `search_tags`, `search_frontmatter` |
+| **Graph navigation** | relationships between notes | `note_links`, `vault_broken_links`, `vault_orphans` |
+| **Note operations** | read, create, edit, move, patch | `note_*`, `vault_*`, `periodic_*` |
 
 Keeping lexical search as its *own tool* rather than blending it into semantic
 ranking was a measured decision — see
@@ -496,7 +496,7 @@ Each has a regression test. Detail: [docs/FIXES.md](docs/FIXES.md).
   is systematically higher than a single summary score, so the arms are not on
   equal footing. Normalising for chunk count would be more principled.
 - **The summary arm costs storage** — roughly +5% vectors and +21% indexing time.
-- **`wikilinks` output is not deterministically ordered** (hash-map iteration),
+- **`note_links` output is not deterministically ordered** (hash-map iteration),
   which matters for snapshot testing.
 - **One test is ignored on Windows** — a pre-existing upstream failure where
   Windows denies an atomic file replace while a reader holds the file open.

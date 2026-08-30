@@ -138,7 +138,7 @@ impl ObsidianMcp {
 
     #[tool(
         name = "search_semantic",
-        description = "Find notes by meaning rather than wording. Use this when you have a question or an idea and do not know which words the note actually uses; use search_text instead when you know the terms that appear in it. Returns `{ results: [...] }`, ranked most similar first, each hit carrying a snippet and its provenance: `match_type` says WHY the note ranked — \"chunk\" (one specific passage matched), \"summary\" (the note's overall gist matched), or \"whole_note\". `best_chunk` is always present and carries the closest passage with its `heading_path`, but when `match_type` is \"summary\" that passage did NOT cause the ranking, so do not cite it as the reason the note was found. Requires semantic search to be enabled; while the index is still building this returns an explicit \"warming\" error with progress rather than degrading silently."
+        description = "Find notes by meaning rather than wording. Use this when you have a question or an idea and do not know which words the note actually uses; use search_text instead when you know the terms that appear in it. Returns `{ results: [...] }`, ranked most similar first, each hit carrying a snippet. When the query is answered in-process, hits also carry provenance: `match_type` says WHY the note ranked — \"chunk\" (one specific passage matched) or \"summary\" (the note's overall gist matched) — and `best_chunk` gives the closest passage with its `heading_path`. On a \"summary\" match that passage did NOT cause the ranking, so do not cite it as the reason the note was found. Those three fields are ABSENT whenever the semantic daemon answers instead, which is the default while a daemon is running, because its protocol carries note-level hits only: read their absence as \"unknown\", never as \"chunk\". note_related always reports provenance, being answered in-process. Requires semantic search to be enabled; while the index is still building this returns an explicit \"warming\" error with progress rather than degrading silently."
     )]
     async fn search_semantic(
         &self,
@@ -479,11 +479,14 @@ impl ServerHandler for ObsidianMcp {
                  - You already have a note and want its neighbours -> note_related \
                  (by meaning) or note_links (by recorded wikilink)\n\
                  \n\
-                 Semantic results carry their own provenance. `match_type` says \
-                 why a note ranked: \"chunk\" means one passage matched, \"summary\" \
-                 means the note's overall gist did. `best_chunk` is always present, \
-                 but on a summary match it is merely the closest passage and did \
-                 not cause the ranking - do not report it as the reason.\n\
+                 Semantic results may carry provenance. `match_type` says why a \
+                 note ranked: \"chunk\" means one passage matched, \"summary\" means \
+                 the note's overall gist did. `best_chunk` is the closest passage, \
+                 but on a summary match it did not cause the ranking - do not \
+                 report it as the reason. Both fields are absent when the semantic \
+                 daemon answers a search_semantic query, which carries note-level \
+                 hits only; absent means unknown, not \"chunk\". note_related \
+                 always reports them.\n\
                  \n\
                  Not every tool listed here is always available: the server can be \
                  started with a restricted tool set, in which case the hidden tools \
