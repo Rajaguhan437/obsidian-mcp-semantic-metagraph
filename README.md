@@ -41,7 +41,7 @@ On the vault it was developed against that moved retrieval nDCG from **0.834 to
 
 ---
 
-**Start here** — [Install](#install) · [Configuration](#configuration) · [Tools](#tools)
+**Start here** — [Install](#install) · [Configuration](#configuration) · [Dashboard](#status-dashboard) · [Tools](#tools)
 
 **How it works** — [What an agent gets](#what-it-gives-an-agent) · [Retrieval architecture](#retrieval-architecture) · [Provenance](#retrieval-provenance) · [Graph](#graph-capabilities)
 
@@ -270,6 +270,30 @@ silently costs accuracy. Here the query prefix alone was worth nDCG 0.675 → 0.
 | `OBSIDIAN_EXCLUDE_PATHS` | none |
 | `OBSIDIAN_TOOLS` | `full` |
 
+## Status dashboard
+
+Under HTTP transport the server also serves a status page at **`/dashboard`** —
+no bundler, no CDN, no assets, just one embedded file.
+
+It answers what otherwise needs a hand-rolled MCP handshake to ask: whether the
+semantic index is ready or still warming, how many notes are indexed versus
+pending, which embedding model and endpoint are actually in use, which paths are
+excluded, and which tools are exposed — each with its parameters, types and
+required flags.
+
+The tool list is built from the same router the request path dispatches against,
+so it shows what clients are genuinely served rather than what the configuration
+merely asked for. When a tool filter is active, hidden tools are absent here too.
+
+| endpoint | purpose |
+|---|---|
+| `/dashboard` | the page |
+| `/api/info` | the same data as JSON — config, index state, tool schemas |
+| `/health` | liveness plus index readiness, for scripts |
+
+`embeddings_ready` is the field worth gating on: a warming index still answers,
+and that is the one failure mode that resembles success.
+
 ## Tools
 
 20 tools. Reference: [docs/TOOLS.md](docs/TOOLS.md).
@@ -408,7 +432,22 @@ and 8,263 chunks; 133 MB peak.](docs/images/engineering.png)
 | No query/document prefixes | asymmetric models silently underperformed |
 | Semantic score exceeding `[0,1]` after weighting | unbalanced both hybrid blends; `alpha` stopped meaning what it says |
 | Cache-load errors swallowed by `.ok()` | a rejected cache silently re-embedded everything |
+| `OBSIDIAN_TOOLS` never enforced | **a read-only server still executed every write tool** |
 | Self-updater reinstalling the upstream package | removed — 3,257 lines |
+
+> The tool-filter fix is worth spelling out, because the failure was silent and
+> the consequences are not retrieval quality but data integrity.
+> `#[tool_handler]` defaults its router to `Self::tool_router()`, which builds a
+> **fresh** router on every request. The disabled set applied in `new` lives on
+> `self.tool_router`, so the handler never saw it: the filter parsed, logged and
+> stored correctly while `tools/list` advertised all 20 tools and `call_tool`
+> dispatched them. A server started with `OBSIDIAN_TOOLS=read` would delete a
+> note on request. The fix is `#[tool_handler(router = self.tool_router)]`.
+>
+> The pre-existing tests passed throughout, because they asserted on
+> `server.tool_router` — the field, which really was disabled — rather than on
+> what a client is served. The regression tests added here drive the wire
+> protocol instead, and fail without the fix.
 
 Each has a regression test. Detail: [docs/FIXES.md](docs/FIXES.md).
 

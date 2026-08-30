@@ -128,7 +128,45 @@ rebuilt the entire index.
 
 **Fix:** the rejection is logged with its reason and the note count.
 
-## 10. Self-updater removed
+## 10. `OBSIDIAN_TOOLS` was never enforced
+
+The most consequential fix here, because its failure mode is data loss rather
+than degraded retrieval.
+
+`#[tool_handler]` defaults its router expression to `Self::tool_router()` — a
+**freshly constructed** router, rebuilt on every request. The disabled set is
+applied in `ObsidianMcp::new` to `self.tool_router`, so the handler never
+consulted it. `OBSIDIAN_TOOLS` parsed correctly, `disabled_tools()` computed the
+right set and the count was logged, while `list_tools` still advertised all 20
+tools and `call_tool` dispatched them.
+
+Confirmed against a running server started with `OBSIDIAN_TOOLS=read`:
+
+```
+tools/call note_delete {"path":"…","confirm":true}
+  → -32002  "Note not found: …"      ← a vault-layer answer: it executed
+```
+
+Had the note existed, a read-only server would have deleted it.
+
+**Fix:** `#[tool_handler(router = self.tool_router)]`. The same call now returns
+`tool not found`, rejected by the router before parameter deserialization.
+
+**Why the existing tests missed it.** All three asserted on
+`server.tool_router.has_route(...)` — the field, which genuinely *was* disabled.
+Nothing exercised what a client actually receives. The bug lived exactly in the
+gap between the two.
+
+**Tests:** `disabled_tools_are_absent_from_tools_list` and
+`calling_a_disabled_tool_is_rejected_before_it_runs` drive a real JSON-RPC
+session over a duplex transport. Both fail without the fix while the three
+field-level tests still pass — verified by reverting the attribute and re-running.
+`enabled_tools_still_work_while_a_filter_is_active` guards the other direction.
+
+Inherited from upstream, which carries the same bare `#[tool_handler]` and the
+same `OBSIDIAN_TOOLS` option.
+
+## 11. Self-updater removed
 
 `src/upgrade/` was 3,061 lines of launchd/systemd/cargo-install machinery that
 reinstalls the **upstream** crates.io package over itself — actively wrong in a

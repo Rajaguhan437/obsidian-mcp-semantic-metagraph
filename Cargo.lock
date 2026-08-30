@@ -2288,8 +2288,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "obsidian-mcp"
-version = "2.5.0"
+name = "obsidian-mcp-semantic-metagraph"
+version = "0.1.0"
 dependencies = [
  "axum",
  "bincode",

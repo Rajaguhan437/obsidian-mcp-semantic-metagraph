@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>obsidian-mcp — status</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --border: #e2e2e6; --text: #16161a;
+    --muted: #6b6b76; --accent: #4f46e5; --ok: #15803d; --warn: #b45309;
+    --err: #b91c1c; --code-bg: #f0f0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e0e11; --panel: #17171c; --border: #2a2a33; --text: #e8e8ec;
+      --muted: #9a9aa8; --accent: #818cf8; --ok: #4ade80; --warn: #fbbf24;
+      --err: #f87171; --code-bg: #1e1e25;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem; background: var(--bg); color: var(--text);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; margin-bottom: .35rem; }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -.01em; }
+  .ver { color: var(--muted); font-size: .85rem; font-family: ui-monospace, monospace; }
+  .sub { color: var(--muted); font-size: .85rem; margin-bottom: 1.5rem; }
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1rem 1.1rem;
+  }
+  .card h2 {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted); margin: 0 0 .8rem; font-weight: 600;
+  }
+  .row { display: flex; justify-content: space-between; gap: 1rem; padding: .3rem 0; font-size: .88rem; }
+  .row + .row { border-top: 1px solid var(--border); }
+  .row dt { color: var(--muted); white-space: nowrap; }
+  .row dd {
+    margin: 0; text-align: right; font-family: ui-monospace, monospace;
+    font-size: .84rem; overflow-wrap: anywhere;
+  }
+  /* Keep exclusion globs and prefixes intact; only long paths may wrap. */
+  .row dd code { white-space: nowrap; }
+  dl { margin: 0; }
+  .pill {
+    display: inline-block; padding: .13rem .5rem; border-radius: 999px;
+    font-size: .74rem; font-weight: 600; font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  .pill.ok   { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .pill.err  { background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err); }
+  .bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: .7rem; }
+  .bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
+  section.tools { margin-top: 1.75rem; }
+  section.tools > h2 {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted); margin: 0 0 .8rem; font-weight: 600;
+  }
+  details.tool {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; margin-bottom: .5rem;
+  }
+  details.tool > summary {
+    cursor: pointer; padding: .6rem .9rem; display: flex; gap: .7rem;
+    align-items: baseline; flex-wrap: wrap; list-style: none;
+  }
+  details.tool > summary::-webkit-details-marker { display: none; }
+  details.tool > summary::before { content: "▸"; color: var(--muted); font-size: .8rem; }
+  details.tool[open] > summary::before { content: "▾"; }
+  .tname { font-family: ui-monospace, monospace; font-weight: 600; font-size: .87rem; }
+  .tdesc { color: var(--muted); font-size: .8rem; flex: 1; min-width: 12rem; }
+  .params { padding: 0 .9rem .8rem 2.1rem; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+  th, td { text-align: left; padding: .32rem .6rem .32rem 0; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+  td.k { font-family: ui-monospace, monospace; white-space: nowrap; }
+  td.t { font-family: ui-monospace, monospace; color: var(--accent); white-space: nowrap; }
+  .req { color: var(--err); font-weight: 700; }
+  .none { color: var(--muted); font-style: italic; font-size: .82rem; }
+  code { background: var(--code-bg); padding: .07rem .3rem; border-radius: 4px; font-size: .82rem; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: .78rem; }
+  #err {
+    display: none; background: color-mix(in srgb, var(--err) 12%, transparent);
+    border: 1px solid var(--err); color: var(--err);
+    padding: .7rem .9rem; border-radius: 8px; margin-bottom: 1rem; font-size: .86rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="err"></div>
+  <header>
+    <h1 id="server">obsidian-mcp</h1>
+    <span class="ver" id="version"></span>
+  </header>
+  <p class="sub" id="build"></p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Semantic index</h2>
+      <dl id="idx"></dl>
+      <div class="bar"><i id="idxbar" style="width:0%"></i></div>
+    </div>
+    <div class="card">
+      <h2>Embedding model</h2>
+      <dl id="model"></dl>
+    </div>
+    <div class="card">
+      <h2>Vault</h2>
+      <dl id="vault"></dl>
+    </div>
+    <div class="card">
+      <h2>Server</h2>
+      <dl id="cfg"></dl>
+    </div>
+  </div>
+
+  <section class="tools">
+    <h2>Tools <span id="tcount" class="ver"></span></h2>
+    <div id="tools"></div>
+  </section>
+
+  <footer>
+    Auto-refreshes every 5s · raw JSON at <code>/api/info</code> · liveness at <code>/health</code>
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let lastToolsKey = null;
+
+function rows(target, pairs) {
+  target.innerHTML = pairs.map(([k, v]) =>
+    `<div class="row"><dt>${esc(k)}</dt><dd>${v === undefined || v === null || v === "" ? "—" : v}</dd></div>`
+  ).join("");
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function bytes(n) {
+  if (typeof n !== "number") return "—";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + " " + u[i];
+}
+
+function pill(text, kind) {
+  return `<span class="pill ${kind}">${esc(text)}</span>`;
+}
+
+function render(d) {
+  $("server").textContent = d.server || "obsidian-mcp";
+  $("version").textContent = "v" + (d.version || "?");
+  const b = d.build || {};
+  $("build").textContent = [b.features && "features: " + b.features, b.target]
+    .filter(Boolean).join("  ·  ");
+
+  // ── index ──
+  const e = d.embeddings || {};
+  let state, kind;
+  if (!e.enabled) { state = "disabled"; kind = "warn"; }
+  else if (e.error) { state = "error"; kind = "err"; }
+  else if (e.ready) { state = e.phase || "ready"; kind = "ok"; }
+  else { state = e.phase || "warming"; kind = "warn"; }
+
+  const done = e.indexed_notes ?? 0, total = e.total_notes ?? 0;
+  rows($("idx"), [
+    ["status", pill(state, kind)],
+    ["indexed", total ? `${done} / ${total}` : "—"],
+    ["pending", e.pending_notes ?? "—"],
+    ...(e.error ? [["error", `<span style="color:var(--err)">${esc(e.error)}</span>`]] : []),
+  ]);
+  $("idxbar").style.width = total ? (100 * done / total).toFixed(1) + "%" : "0%";
+
+  // ── model ──
+  rows($("model"), [
+    ["model", esc(e.api_model || e.model || "—")],
+    ["provider", esc(e.provider || "—")],
+    ["endpoint", esc(e.api_base || "local")],
+    ["query prefix", e.query_prefix ? `<code>${esc(e.query_prefix)}</code>` : "—"],
+    ["doc prefix", e.doc_prefix ? `<code>${esc(e.doc_prefix)}</code>` : "—"],
+  ]);
+
+  // ── vault ──
+  const v = d.vault || {}, c = d.config || {};
+  rows($("vault"), [
+    ["notes", v.total_notes ?? "—"],
+    ["files", v.total_files ?? "—"],
+    ["tags", v.total_tags ?? "—"],
+    ["links", v.total_links ?? "—"],
+    ["size", bytes(v.vault_size_bytes)],
+    ["excluded", v.excluded_notes ?? "—"],
+  ]);
+
+  // ── server ──
+  const ex = c.exclude_patterns || [];
+  const dis = c.disabled_tools || [];
+  rows($("cfg"), [
+    ["listening", esc(`${c.host}:${c.port}`)],
+    ["vault path", esc(c.vault_path || "—")],
+    ["watcher", c.watch ? pill("on", "ok") : pill("off", "warn")],
+    ["BM25", c.tantivy ? pill("on", "ok") : pill("off", "warn")],
+    ["tool filter", esc(c.tool_filter || "Full")],
+    ["tools hidden", dis.length ? dis.length : "0"],
+    ["exclusions", ex.length ? ex.map(p => `<code>${esc(p)}</code>`).join(" ") : "none"],
+  ]);
+
+  // ── tools ──
+  const tools = d.tools || [];
+  $("tcount").textContent = tools.length + " exposed"
+    + (dis.length ? ` · ${dis.length} hidden` : "");
+
+  // Only rebuild when the manifest actually changes. Re-rendering on every
+  // 5s poll would collapse any <details> the reader had open, under their
+  // cursor, for no reason — the tool list is static for a process lifetime.
+  const key = JSON.stringify(tools);
+  if (key === lastToolsKey) return;
+  lastToolsKey = key;
+
+  $("tools").innerHTML = tools.map(t => {
+    const schema = t.inputSchema || t.input_schema || {};
+    const props = schema.properties || {};
+    const required = new Set(schema.required || []);
+    const keys = Object.keys(props);
+    const body = keys.length
+      ? `<table><thead><tr><th>param</th><th>type</th><th>description</th></tr></thead><tbody>`
+        + keys.map(k => {
+            const p = props[k] || {};
+            const ty = p.type || (p.anyOf ? p.anyOf.map(x => x.type).filter(Boolean).join(" | ") : "any");
+            return `<tr><td class="k">${esc(k)}${required.has(k) ? '<span class="req">*</span>' : ""}</td>`
+                 + `<td class="t">${esc(ty)}</td><td>${esc(p.description || "")}</td></tr>`;
+          }).join("")
+        + `</tbody></table>`
+      : `<p class="none">No parameters.</p>`;
+    return `<details class="tool"><summary><span class="tname">${esc(t.name)}</span>`
+         + `<span class="tdesc">${esc((t.description || "").split("\n")[0])}</span></summary>`
+         + `<div class="params">${body}</div></details>`;
+  }).join("");
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/info", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+    $("err").style.display = "none";
+  } catch (e) {
+    $("err").textContent = "Cannot reach the server: " + e.message;
+    $("err").style.display = "block";
+  }
+}
+
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

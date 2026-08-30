@@ -99,6 +99,10 @@ async fn serve_http(
     mcp_config.json_response = true;
 
     let health_vault = vault.clone();
+    // Snapshot the unchanging half of the dashboard payload before the service
+    // closure takes ownership of `server_disabled`.
+    let dashboard_base = dashboard_static_json(config, &server_disabled);
+    let dashboard_vault = vault.clone();
     let mcp_service: StreamableHttpService<ObsidianMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -125,6 +129,11 @@ async fn serve_http(
 
     let app = Router::new()
         .route("/health", get(move || health_handler(health_vault.clone())))
+        .route(
+            "/api/info",
+            get(move || info_handler(dashboard_vault.clone(), dashboard_base.clone())),
+        )
+        .route("/dashboard", get(dashboard_page))
         .merge(mcp_router);
 
     let addr = std::net::SocketAddr::new(config.http_host, config.http_port);
@@ -196,6 +205,98 @@ async fn health_handler(vault: Vault) -> axum::Json<serde_json::Value> {
     }
 
     axum::Json(resp)
+}
+
+/// The half of `/api/info` that cannot change while the process runs:
+/// build metadata, resolved configuration, and the effective tool list.
+///
+/// Snapshotting it keeps the per-request handler cheap, and taking the tool list
+/// from `tools::tool_manifest` means the page reports what clients are actually
+/// served rather than what the config merely asked for.
+fn dashboard_static_json(config: &Config, disabled: &HashSet<String>) -> serde_json::Value {
+    let mut disabled_tools: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    disabled_tools.sort_unstable();
+
+    serde_json::json!({
+        "server": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "build": {
+            "features": env!("OBSIDIAN_MCP_BUILD_FEATURES"),
+            "target": env!("OBSIDIAN_MCP_BUILD_TARGET"),
+        },
+        "config": {
+            "vault_path": config.vault_path.display().to_string(),
+            "transport": format!("{:?}", config.transport),
+            "host": config.http_host.to_string(),
+            "port": config.http_port,
+            "watch": config.watch,
+            "tantivy": config.tantivy,
+            "log_level": config.log_level,
+            "hybrid_alpha": config.hybrid_alpha,
+            "exclude_patterns": config.exclude_patterns,
+            "tool_filter": format!("{:?}", config.tool_filter),
+            "disabled_tools": disabled_tools,
+        },
+        "embeddings": {
+            "enabled": config.embeddings,
+            "model": config.embeddings_model,
+            "provider": config.embedding_provider.as_ref().map(|p| format!("{p:?}")),
+            "api_base": std::env::var("OBSIDIAN_EMBEDDING_API_BASE").ok(),
+            "api_model": std::env::var("OBSIDIAN_EMBEDDING_API_MODEL").ok(),
+            "query_prefix": std::env::var("OBSIDIAN_EMBEDDING_QUERY_PREFIX")
+                .unwrap_or_else(|_| "query: ".into()),
+            "doc_prefix": std::env::var("OBSIDIAN_EMBEDDING_DOC_PREFIX")
+                .unwrap_or_else(|_| "passage: ".into()),
+        },
+        "tools": obsidian_mcp::tools::tool_manifest(disabled),
+    })
+}
+
+/// `/api/info` — the static snapshot plus live vault and index counters.
+async fn info_handler(vault: Vault, base: serde_json::Value) -> axum::Json<serde_json::Value> {
+    let mut resp = base;
+
+    if let Ok(stats) = vault.vault_stats() {
+        resp["vault"] = serde_json::json!({
+            "total_notes": stats.total_notes,
+            "total_files": stats.total_files,
+            "total_tags": stats.total_tags,
+            "total_links": stats.total_links,
+            "vault_size_bytes": stats.vault_size_bytes,
+            "excluded_notes": stats.excluded_notes,
+        });
+    }
+
+    #[cfg(has_embeddings)]
+    {
+        let status = vault.embedding_status();
+        resp["embeddings"]["ready"] =
+            serde_json::json!(status.as_ref().is_some_and(|status| status.queryable));
+        if let Some(status) = &status {
+            resp["embeddings"]["phase"] = serde_json::json!(status.phase);
+            resp["embeddings"]["indexed_notes"] = serde_json::json!(status.indexed_notes);
+            resp["embeddings"]["total_notes"] = serde_json::json!(status.total_notes);
+            resp["embeddings"]["pending_notes"] = serde_json::json!(status.pending_notes);
+        }
+        if let Some(err) = status
+            .as_ref()
+            .and_then(|status| status.last_error.as_deref())
+            .or_else(|| vault.embedding_load_error())
+        {
+            resp["embeddings"]["error"] = serde_json::json!(err);
+        }
+    }
+
+    axum::Json(resp)
+}
+
+/// `/dashboard` — a single self-contained page rendering `/api/info`.
+///
+/// Deliberately dependency-free: no bundler, no CDN, no assets to serve. The
+/// server has no web UI otherwise, so this is the only way to read index state
+/// without hand-rolling an MCP handshake.
+async fn dashboard_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("dashboard.html"))
 }
 
 async fn shutdown_signal() {

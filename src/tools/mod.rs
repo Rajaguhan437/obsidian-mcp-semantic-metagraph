@@ -84,8 +84,22 @@ pub struct ObsidianMcp {
     vault: Vault,
     hybrid_alpha: f32,
     semantic_runtime: SemanticRuntime,
-    #[allow(dead_code)]
+    /// The router the handler dispatches against. Disabled routes are applied
+    /// here in `new`, so this must stay the router `#[tool_handler]` is pointed
+    /// at — see the comment on that attribute.
     pub tool_router: ToolRouter<Self>,
+}
+
+/// The tools a server carrying this `disabled` set actually advertises.
+///
+/// Built from the same router the request path dispatches against, so a status
+/// page cannot drift from what clients really see when a filter is active.
+pub fn tool_manifest(disabled: &HashSet<String>) -> serde_json::Value {
+    let mut router = ObsidianMcp::tool_router();
+    for name in disabled {
+        router.disable_route(name.clone());
+    }
+    serde_json::to_value(router.list_all()).unwrap_or_else(|_| serde_json::json!([]))
 }
 
 #[tool_router]
@@ -360,7 +374,13 @@ impl ObsidianMcp {
     }
 }
 
-#[tool_handler]
+// `router = self.tool_router` is load-bearing. Without it the macro defaults to
+// `Self::tool_router()`, which builds a *fresh* router per request and so ignores
+// the per-instance disabled set applied in `new`. That made `OBSIDIAN_TOOLS`
+// silently ineffective on both transports: the filter was parsed, logged and
+// stored on the field, yet `list_tools` still advertised every tool and
+// `call_tool` executed write tools on a read-only server.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for ObsidianMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -394,10 +414,17 @@ mod tests {
         }
     }
 
-    async fn call_tool_raw(
+    /// Drive a real JSON-RPC session against `server` over an in-memory duplex
+    /// transport, returning the response to `method`.
+    ///
+    /// Asserting on `server.tool_router` only proves the field was mutated — it
+    /// cannot catch a handler that consults a *different* router, which is
+    /// exactly how `OBSIDIAN_TOOLS` came to be inert while its own tests passed.
+    /// Anything about tool visibility or dispatch has to go through here.
+    async fn rpc_raw(
         server: ObsidianMcp,
-        name: &str,
-        arguments: serde_json::Value,
+        method: &str,
+        params: serde_json::Value,
     ) -> serde_json::Value {
         let (server_transport, client_transport) = tokio::io::duplex(1024 * 1024);
         let server_handle = tokio::spawn(async move {
@@ -438,11 +465,8 @@ mod tests {
         let mut call = serde_json::to_vec(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments
-            }
+            "method": method,
+            "params": params
         }))
         .unwrap();
         call.push(b'\n');
@@ -454,6 +478,30 @@ mod tests {
         drop(client_lines);
         server_handle.await.unwrap();
         response
+    }
+
+    async fn call_tool_raw(
+        server: ObsidianMcp,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        rpc_raw(
+            server,
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": arguments }),
+        )
+        .await
+    }
+
+    /// Tool names actually advertised to a client by `tools/list`.
+    async fn advertised_tools(server: ObsidianMcp) -> HashSet<String> {
+        let response = rpc_raw(server, "tools/list", serde_json::json!({})).await;
+        response["result"]["tools"]
+            .as_array()
+            .expect("tools/list returns an array")
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -507,6 +555,83 @@ mod tests {
                 "expected tool '{name}' to be disabled"
             );
         }
+    }
+
+    /// The three tests above assert on the router *field*. That is necessary but
+    /// not sufficient: the handler macro can be pointed at a different router, in
+    /// which case the field is disabled and the server still serves everything.
+    /// These drive the wire protocol instead.
+    #[tokio::test]
+    async fn disabled_tools_are_absent_from_tools_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_vault(tmp.path());
+        let vault = Vault::open(&test_config(tmp.path())).await.unwrap();
+
+        let disabled: HashSet<String> = ["note_delete", "note_write", "note_move"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let server = ObsidianMcp::new(vault, 0.25, test_runtime(), disabled.clone());
+
+        let advertised = advertised_tools(server).await;
+
+        for name in &disabled {
+            assert!(
+                !advertised.contains(name),
+                "tools/list advertised '{name}', which is disabled"
+            );
+        }
+        assert!(
+            advertised.contains("note_read"),
+            "tools/list dropped an enabled tool"
+        );
+        assert_eq!(advertised.len(), ALL_TOOL_NAMES.len() - disabled.len());
+    }
+
+    #[tokio::test]
+    async fn calling_a_disabled_tool_is_rejected_before_it_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_vault(tmp.path());
+        let vault = Vault::open(&test_config(tmp.path())).await.unwrap();
+
+        let disabled: HashSet<String> = ["note_delete"].iter().map(|s| s.to_string()).collect();
+        let server = ObsidianMcp::new(vault, 0.25, test_runtime(), disabled);
+
+        let response = call_tool_raw(
+            server,
+            "note_delete",
+            serde_json::json!({ "path": "note.md", "confirm": true }),
+        )
+        .await;
+
+        let error = response
+            .get("error")
+            .unwrap_or_else(|| panic!("disabled tool returned a result, not an error: {response}"));
+        let message = error["message"].as_str().unwrap_or_default();
+
+        // A vault-layer answer ("Note not found", "deleted") would mean the call
+        // reached the tool. The rejection has to happen before dispatch.
+        assert!(
+            message.contains("tool not found"),
+            "expected a routing rejection, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enabled_tools_still_work_while_a_filter_is_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_vault(tmp.path());
+        let vault = Vault::open(&test_config(tmp.path())).await.unwrap();
+
+        let disabled: HashSet<String> = ["note_delete"].iter().map(|s| s.to_string()).collect();
+        let server = ObsidianMcp::new(vault, 0.25, test_runtime(), disabled);
+
+        let response = call_tool_raw(server, "vault_info", serde_json::json!({})).await;
+
+        assert!(
+            response.get("error").is_none(),
+            "an enabled tool was rejected while a filter was active: {response}"
+        );
     }
 
     #[tokio::test]
