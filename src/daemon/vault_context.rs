@@ -219,8 +219,9 @@ impl VaultContext {
         &self,
         query: &str,
         top_k: usize,
+        scope: Option<&crate::vault::exclude::ExcludeSet>,
     ) -> VaultResult<Vec<(PathBuf, f32)>> {
-        let current_paths = self.indexed_paths()?;
+        let current_paths = self.scoped_paths(scope)?;
         self.embedding_runtime
             .query_snapshot()?
             .semantic_scores_for_paths(query, &current_paths, top_k)
@@ -239,11 +240,32 @@ impl VaultContext {
         &self,
         query: &str,
         top_k: usize,
+        scope: Option<&crate::vault::exclude::ExcludeSet>,
     ) -> VaultResult<Vec<(PathBuf, crate::vault::embeddings::NoteMatch)>> {
-        let current_paths = self.indexed_paths()?;
+        let current_paths = self.scoped_paths(scope)?;
         self.embedding_runtime
             .query_snapshot()?
             .semantic_hits_for_paths(query, &current_paths, top_k)
+    }
+
+    /// Indexed notes, narrowed to the caller's scope globs when it sent any.
+    ///
+    /// Narrowing happens here, before ranking, so a scoped query cannot be
+    /// starved by out-of-scope notes taking the top-k slots.
+    #[cfg(has_embeddings)]
+    fn scoped_paths(
+        &self,
+        scope: Option<&crate::vault::exclude::ExcludeSet>,
+    ) -> VaultResult<std::collections::HashSet<PathBuf>> {
+        let paths = self.indexed_paths()?;
+        let Some(scope) = scope.filter(|set| !set.is_empty()) else {
+            return Ok(paths);
+        };
+        // `ExcludeSet` is a glob matcher; here its verdict reads as "included".
+        Ok(paths
+            .into_iter()
+            .filter(|path| scope.is_excluded(path))
+            .collect())
     }
 
     #[cfg(has_embeddings)]
@@ -297,6 +319,7 @@ impl VaultContext {
         &self,
         _query: &str,
         _top_k: usize,
+        _scope: Option<&crate::vault::exclude::ExcludeSet>,
     ) -> VaultResult<Vec<(PathBuf, f32)>> {
         Err(VaultError::Embedding(
             "daemon binary compiled without embeddings feature".to_string(),

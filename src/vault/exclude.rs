@@ -8,9 +8,20 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use crate::error::{VaultError, VaultResult};
 
 /// Compiled set of glob patterns for excluding vault paths from indexing.
+///
+/// `Debug` prints the patterns, not the compiled `GlobSet`, which has no useful
+/// representation — that is what a caller wants to see in a failed assertion.
 pub struct ExcludeSet {
     set: GlobSet,
     patterns: Vec<String>,
+}
+
+impl std::fmt::Debug for ExcludeSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExcludeSet")
+            .field("patterns", &self.patterns)
+            .finish()
+    }
 }
 
 impl ExcludeSet {
@@ -19,6 +30,22 @@ impl ExcludeSet {
     /// Each pattern is trimmed, blank entries are skipped, and trailing `/`
     /// is normalized to `/**`. Invalid patterns are logged and skipped.
     pub fn build(patterns: Vec<String>) -> VaultResult<Self> {
+        Self::compile(patterns, false)
+    }
+
+    /// As [`Self::build`], but a malformed glob is an error rather than a
+    /// warning.
+    ///
+    /// Skipping a bad pattern is right for an exclusion list — the server
+    /// should still start, and it errs toward indexing more. It is wrong
+    /// wherever the same patterns act as an *include* list: dropping one
+    /// widens the set silently, and the caller sees results from outside the
+    /// slice it asked for with nothing to distinguish them.
+    pub fn build_strict(patterns: Vec<String>) -> VaultResult<Self> {
+        Self::compile(patterns, true)
+    }
+
+    fn compile(patterns: Vec<String>, strict: bool) -> VaultResult<Self> {
         let mut builder = GlobSetBuilder::new();
         let mut accepted = Vec::new();
 
@@ -40,6 +67,11 @@ impl ExcludeSet {
                     accepted.push(normalized);
                 }
                 Err(e) => {
+                    if strict {
+                        return Err(VaultError::Other(format!(
+                            "invalid glob pattern '{trimmed}': {e}"
+                        )));
+                    }
                     tracing::warn!(pattern = trimmed, error = %e, "skipping invalid exclude pattern");
                 }
             }
@@ -145,6 +177,19 @@ mod tests {
     fn build_no_normalization_without_trailing_slash() {
         let set = ExcludeSet::build(vec!["*.tmp".into()]).unwrap();
         assert_eq!(set.patterns(), &["*.tmp"]);
+    }
+
+    #[test]
+    fn build_strict_rejects_invalid_pattern() {
+        let error = ExcludeSet::build_strict(vec!["[invalid".into(), "valid/**".into()])
+            .expect_err("a malformed include glob must not be silently dropped");
+        assert!(error.to_string().contains("[invalid"), "{error}");
+    }
+
+    #[test]
+    fn build_strict_accepts_valid_patterns() {
+        let set = ExcludeSet::build_strict(vec!["Archive/".into()]).unwrap();
+        assert_eq!(set.patterns(), &["Archive/**"]);
     }
 
     #[test]

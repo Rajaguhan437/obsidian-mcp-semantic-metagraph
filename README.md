@@ -284,6 +284,7 @@ silently costs accuracy. Here the query prefix alone was worth nDCG 0.675 → 0.
 | `OBSIDIAN_TOOLS` | `full` | A profile (`full` \| `core` \| `read` \| `minimal`), a comma-separated allow-list of tool names, or a `!`-prefixed deny-list. See [Tools](#tools). |
 | `OBSIDIAN_EXCLUDE_PATHS` | none | Comma-separated globs. A trailing `/` expands to `/**`, so `Archive/` is enough. Merged with the vault's `.obsidian-mcp/ignore` file. |
 | `OBSIDIAN_MCP_DATA` | `{vault}/.obsidian-mcp` | Move the index and cache off the vault. |
+| `OBSIDIAN_DEFAULT_SCOPE` | none | Name of a [retrieval scope](#retrieval-scopes) to apply when a query does not ask for one. Unset means every indexed note. A name that is not defined stops the server at startup rather than failing on the first query. |
 | `OBSIDIAN_LOG_LEVEL` | `info` | Any `tracing` filter: `error` \| `warn` \| `info` \| `debug` \| `trace`, or a per-module directive such as `obsidian_mcp::vault=debug`. Logs go to stderr. |
 
 ### Semantic runtime and daemon
@@ -369,6 +370,74 @@ changes the set of indexed notes, so the next start re-embeds the difference.
 
 `obsidian-mcp --help` prints the full list as the binary sees it, which is the
 authority if this table and the binary ever disagree.
+
+## Retrieval scopes
+
+One vault, several independently searchable slices. A scope is a set of include
+globs; `search_semantic` and `note_related` take a `scope` name and rank only
+the notes it covers.
+
+This exists because a vault often holds more than one *kind* of knowledge. An
+agent that writes its own notes into the same vault should be able to search
+what it wrote without those notes surfacing in every question about the
+material it was given — and should still be able to search both at once when
+the question genuinely spans them.
+
+Define them in `.obsidian-mcp/scopes`:
+
+```ini
+# The name in brackets is what a query passes as `scope`.
+[knowledge]
+Reading/
+Research/
+
+[agent]
+Agent Notes/
+
+# `+name` unions another scope, so a folder is listed once.
+[everything]
++knowledge
++agent
+```
+
+Glob rules are identical to `ignore` — a trailing `/` covers the folder — and
+the file merges across both config locations the same way. `all` is reserved
+and always means every indexed note.
+
+**`ignore` and `scopes` answer different questions.** `ignore` decides what is
+indexed at all; a scope only decides what a given query may rank. A note has to
+survive `ignore` before any scope can see it.
+
+`vault_info` lists the defined scopes with a live note count and the globs
+behind each, which is how an agent discovers what it can ask for.
+
+### One set of vectors, not one per scope
+
+A scope filters the candidate set; it does not maintain a separate index. For
+the **semantic** arm those are the same thing, provably: a semantic score is
+`cosine(query_vector, note_vector)`, and nothing in the ranking path is
+corpus-relative — each note is scored on its own, the summary arm applies a
+constant weight, and the final step is a plain sort. Removing a note from the
+candidate set changes no surviving note's score, so a scope's top-k is exactly
+what a separate index over those notes would return. Three scopes cost one set
+of vectors, one reconcile loop and one cache.
+
+**The lexical arm is different and the same claim must not be made for it.**
+BM25's idf is computed across the whole corpus, so `lexical_prefetch: true`
+under a scope gives a scoped *ranking* built on full-vault term statistics. The
+candidates are also chosen before the scope is applied, so the prefetch is
+widened when a scope is active to stop a small scope being starved by a
+candidate list drawn from everything.
+
+### Narrowing is refused, never guessed
+
+An unrecognised scope name is an error that lists the real ones. It is never
+treated as "no scope", because a query that silently searched the whole vault —
+or silently searched a fraction of it — would return a plausible result set
+with nothing to distinguish it from a correct one. For the same reason a
+malformed glob in a scope is a hard failure rather than a skipped line, and an
+unknown `+reference` stops startup instead of quietly resolving to less.
+
 
 ## Status dashboard
 

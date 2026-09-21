@@ -31,6 +31,7 @@ fn fixture_config() -> Config {
         tool_filter: ToolFilter::Full,
         mcp_data_dir: None,
         exclude_patterns: vec![],
+        default_scope: None,
     }
 }
 
@@ -59,6 +60,7 @@ async fn copy_fixture_to_temp() -> (tempfile::TempDir, Vault) {
         tool_filter: ToolFilter::Full,
         mcp_data_dir: None,
         exclude_patterns: vec![],
+        default_scope: None,
     };
     let vault = Vault::open(&config)
         .await
@@ -457,6 +459,7 @@ mod vault_tantivy_search {
             tool_filter: ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         };
         let vault = Vault::open(&config)
             .await
@@ -751,6 +754,7 @@ mod unicode_paths {
             tool_filter: ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         }
     }
 
@@ -896,6 +900,7 @@ mod tool_filtering {
             tool_filter: filter,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         }
     }
 
@@ -1062,6 +1067,7 @@ mod vault_exclusion {
             tool_filter: ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: patterns,
+            default_scope: None,
         }
     }
 
@@ -1420,6 +1426,7 @@ mod vault_semantic_search {
             tool_filter: ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         }
     }
 
@@ -1689,6 +1696,7 @@ mod semantic_tool_runtime_modes {
             tool_filter: ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         }
     }
 
@@ -2170,6 +2178,7 @@ mod background_embedding_runtime {
             tool_filter: ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: Vec::new(),
+            default_scope: None,
         }
     }
 

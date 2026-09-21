@@ -22,6 +22,7 @@ pub fn test_config(vault_root: &Path) -> Config {
         tool_filter: ToolFilter::Full,
         mcp_data_dir: None,
         exclude_patterns: vec![],
+        default_scope: None,
     }
 }
 
@@ -41,6 +42,7 @@ pub fn tantivy_config(vault_root: &Path) -> Config {
         tool_filter: ToolFilter::Full,
         mcp_data_dir: None,
         exclude_patterns: vec![],
+        default_scope: None,
     }
 }
 

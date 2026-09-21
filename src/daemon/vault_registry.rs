@@ -332,6 +332,7 @@ mod tests {
                 vault_root: vault_root.display().to_string(),
                 query: "semantic".into(),
                 top_k: Some(10),
+                scope_globs: None,
                 include_content: Some(false),
             },
         )
@@ -384,6 +385,7 @@ mod tests {
                 vault_root: vault_root.display().to_string(),
                 query: "semantic".into(),
                 top_k: Some(10),
+                scope_globs: None,
                 include_content: Some(false),
             },
         )
@@ -435,6 +437,7 @@ mod tests {
                 vault_root: vault_root.display().to_string(),
                 query: "semantic".into(),
                 top_k: Some(10),
+                scope_globs: None,
                 include_content: Some(false),
             },
         )

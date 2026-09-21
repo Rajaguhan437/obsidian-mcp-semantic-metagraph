@@ -39,6 +39,14 @@ pub struct NoteRelatedParams {
     /// (default: true). Set false for a compact list of paths and scores.
     #[serde(default)]
     pub include_passages: Option<bool>,
+    /// Which slice of the vault the related notes may come from. `vault_info`
+    /// lists the names; `"all"` always means every indexed note.
+    ///
+    /// The subject note itself does not have to be inside the scope — asking
+    /// what an agent note resembles in the knowledge base is a real question,
+    /// and refusing it would make the parameter useless for exactly that.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(serde::Serialize, JsonSchema)]
@@ -124,7 +132,7 @@ fn note_related_inner(
     let chunk_config = crate::vault::chunker::ChunkConfig::from_env();
     let mut related = Vec::new();
     let mut unlinked_related = 0usize;
-    for (candidate, score, matched) in vault.related_notes(&path, top_k)? {
+    for (candidate, score, matched) in vault.related_notes(&path, top_k, params.scope.as_deref())? {
         let Ok(candidate_meta) = vault.get_note_metadata(&candidate) else {
             continue;
         };

@@ -247,6 +247,7 @@ fn dashboard_static_json(config: &Config, disabled: &HashSet<String>) -> serde_j
             "log_level": config.log_level,
             "hybrid_alpha": config.hybrid_alpha,
             "exclude_patterns": config.exclude_patterns,
+            "default_scope": config.default_scope,
             "tool_filter": format!("{:?}", config.tool_filter),
             "disabled_tools": disabled_tools,
         },
@@ -274,6 +275,28 @@ async fn info_handler(
     watch: bool,
 ) -> axum::Json<serde_json::Value> {
     let mut resp = base;
+
+    // Live, not snapshotted with the rest of the config: the count is what
+    // makes a scope definition checkable, and a scope that has stopped matching
+    // anything should read as zero rather than as whatever it covered at boot.
+    // The EFFECTIVE exclusions, not `config.exclude_patterns`. That field holds
+    // only what OBSIDIAN_EXCLUDE_PATHS supplied, so a vault excluding twenty
+    // folders through .obsidian-mcp/ignore reported "none" - a page whose whole
+    // purpose is saying what actually took effect.
+    resp["config"]["exclude_patterns"] = serde_json::json!(vault.exclude().patterns());
+
+    resp["scopes"] = serde_json::json!(
+        vault
+            .scopes()
+            .names()
+            .into_iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "notes": vault.scope_note_count(name),
+                "patterns": vault.scopes().patterns(name).unwrap_or(&[]),
+            }))
+            .collect::<Vec<_>>()
+    );
 
     if let Ok(stats) = vault.vault_stats() {
         resp["vault"] = serde_json::json!({
@@ -929,6 +952,7 @@ mod tests {
             tool_filter: obsidian_mcp::config::ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         };
         let runtime = init_semantic_runtime(&config, &runtime_config(SemanticMode::Daemon)).await;
         assert!(runtime.daemon_client.is_none());

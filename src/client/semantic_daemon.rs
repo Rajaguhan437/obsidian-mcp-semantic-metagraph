@@ -128,6 +128,7 @@ impl SemanticDaemonClient {
         query: &str,
         top_k: usize,
         include_content: bool,
+        scope_globs: Option<Vec<String>>,
     ) -> VaultResult<SearchResult> {
         self.call(
             "search_semantic",
@@ -136,11 +137,15 @@ impl SemanticDaemonClient {
                 query: query.to_string(),
                 top_k: Some(top_k),
                 include_content: Some(include_content),
+                scope_globs,
             },
         )
         .await
     }
 
+    // Mirrors the wire parameters one-for-one; a wrapper struct here would
+    // just be `SearchHybridParams` with the vault root spelled differently.
+    #[allow(clippy::too_many_arguments)]
     pub async fn search_hybrid(
         &self,
         vault_root: &Path,
@@ -149,6 +154,7 @@ impl SemanticDaemonClient {
         prefetch: usize,
         alpha: f32,
         include_content: bool,
+        scope_globs: Option<Vec<String>>,
     ) -> VaultResult<SearchResult> {
         self.call(
             "search_hybrid",
@@ -159,6 +165,7 @@ impl SemanticDaemonClient {
                 prefetch: Some(prefetch),
                 alpha: Some(alpha),
                 include_content: Some(include_content),
+                scope_globs,
             },
         )
         .await

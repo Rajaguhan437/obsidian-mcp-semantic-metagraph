@@ -179,6 +179,13 @@ pub struct SearchSemanticParams {
     pub top_k: Option<usize>,
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// Vault-relative include globs the results must match.
+    ///
+    /// The daemon has no scopes file: the caller resolves a scope name against
+    /// its own configuration and sends the patterns. Absent or empty means no
+    /// restriction, so an older caller behaves exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_globs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -193,6 +200,13 @@ pub struct SearchHybridParams {
     pub alpha: Option<f32>,
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// Vault-relative include globs the results must match.
+    ///
+    /// The daemon has no scopes file: the caller resolves a scope name against
+    /// its own configuration and sends the patterns. Absent or empty means no
+    /// restriction, so an older caller behaves exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_globs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

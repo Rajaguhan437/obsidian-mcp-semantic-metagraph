@@ -197,9 +197,10 @@ impl EmbeddingQuerySnapshot {
         &self,
         note: &Path,
         top_k: usize,
+        allowed: Option<&HashSet<PathBuf>>,
     ) -> Option<Vec<(PathBuf, super::embeddings::NoteMatch)>> {
         let store = self.store.read().unwrap_or_else(|error| error.into_inner());
-        store.related_to(note, top_k)
+        store.related_to(note, top_k, allowed)
     }
 
     /// Semantic score for one note: the best of its chunks, versus its summary

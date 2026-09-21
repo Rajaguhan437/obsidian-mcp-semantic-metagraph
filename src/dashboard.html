@@ -128,6 +128,11 @@
       <h2>Server</h2>
       <dl id="cfg"></dl>
     </div>
+    <div class="card" id="scopecard" hidden>
+      <h2>Retrieval scopes</h2>
+      <dl id="scopes"></dl>
+      <p class="sub" id="scopenote"></p>
+    </div>
   </div>
 
   <div id="disagree" class="warn-banner"></div>
@@ -213,6 +218,28 @@ function render(d) {
     ["excluded", v.excluded_notes ?? "—"],
   ]);
 
+  // ── retrieval scopes ──
+  // Hidden entirely when none are defined, so a vault that does not use them
+  // is not given an empty card suggesting a feature is broken.
+  const sc = d.scopes || [];
+  const card = $("scopecard");
+  card.hidden = sc.length === 0;
+  if (sc.length) {
+    const dflt = (d.config || {}).default_scope;
+    rows($("scopes"),
+      sc.map(s => [
+        // The default is marked here rather than in a separate row: which scope
+        // an unscoped query lands in is the one fact a reader needs, and it is
+        // useless anywhere except beside the name it applies to.
+        s.name + (s.name === dflt ? " (default)" : ""),
+        `${s.notes} notes · ` + (s.patterns || []).map(p => `<code>${esc(p)}</code>`).join(" "),
+      ]).concat([["all", `${(d.vault || {}).total_notes ?? "—"} notes · every indexed note`]])
+    );
+    $("scopenote").textContent = dflt
+      ? `A query naming no scope searches "${dflt}", not the whole index.`
+      : "A query naming no scope searches the whole index.";
+  }
+
   // ── server ──
   const ex = c.exclude_patterns || [];
   const dis = c.disabled_tools || [];
@@ -221,6 +248,7 @@ function render(d) {
     ["vault path", esc(c.vault_path || "—")],
     ["watcher", c.watch ? pill("on", "ok") : pill("off", "warn")],
     ["BM25", c.tantivy ? pill("on", "ok") : pill("off", "warn")],
+    ["default scope", c.default_scope ? esc(c.default_scope) : "none (whole index)"],
     ["tool filter", esc(c.tool_filter || "Full")],
     ["tools hidden", dis.length ? dis.length : "0"],
     ["exclusions", ex.length ? ex.map(p => `<code>${esc(p)}</code>`).join(" ") : "none"],

@@ -12,6 +12,7 @@ pub mod parser;
 pub mod patch;
 pub mod path;
 pub mod periodic;
+pub mod scope;
 pub mod search_utils;
 pub mod tantivy_index;
 pub mod watcher;
@@ -37,6 +38,7 @@ use crate::models::{
 
 use self::exclude::ExcludeSet;
 use self::index::VaultIndex;
+use self::scope::ScopeSet;
 use self::tantivy_index::TantivyIndex;
 
 #[cfg(has_embeddings)]
@@ -50,12 +52,22 @@ type EmbeddingLoaderFuture = std::pin::Pin<
 #[cfg(not(has_embeddings))]
 type EmbeddingLoaderFuture = ();
 
+/// How much wider to cast the lexical net when a scope will discard candidates.
+#[cfg(has_embeddings)]
+const SCOPED_PREFETCH_FACTOR: usize = 8;
+/// Ceiling on that widening, so a scope cannot turn one query into a full scan.
+#[cfg(has_embeddings)]
+const MAX_SCOPED_PREFETCH: usize = 2_000;
+
 /// Internal shared state wrapped in `Arc` for cheap cloning.
 struct VaultInner {
     root: PathBuf,
     mcp_home: PathBuf,
     mcp_data: PathBuf,
     exclude: Arc<ExcludeSet>,
+    scopes: Arc<ScopeSet>,
+    /// Scope used when a query names none. Already validated against `scopes`.
+    default_scope: Option<String>,
     index: Arc<RwLock<VaultIndex>>,
     tantivy: Option<Arc<TantivyIndex>>,
     #[cfg(has_embeddings)]
@@ -171,6 +183,27 @@ impl Vault {
             );
         }
 
+        // ── retrieval scopes ──
+        let scopes = Arc::new(scope::ScopeSet::build(&scope::load_scope_sources(
+            &mcp_home, &mcp_data,
+        ))?);
+
+        if !scopes.is_empty() {
+            tracing::info!(scopes = ?scopes.names(), "retrieval scopes defined");
+        }
+
+        // Validate the default here, at startup, rather than on the first
+        // query. A typo in the env var would otherwise surface as an error on
+        // every search, long after the setting that caused it left the screen.
+        let default_scope = match config.default_scope.as_deref() {
+            Some(name) => {
+                scopes.require(name)?;
+                tracing::info!(scope = name, "default retrieval scope");
+                Some(name.to_string())
+            }
+            None => None,
+        };
+
         let vi = VaultIndex::build(&root, Arc::clone(&exclude)).await?;
 
         let tantivy = if config.tantivy {
@@ -239,6 +272,8 @@ impl Vault {
                 mcp_home,
                 mcp_data,
                 exclude,
+                scopes,
+                default_scope,
                 index,
                 tantivy,
                 #[cfg(has_embeddings)]
@@ -266,6 +301,62 @@ impl Vault {
     /// Active path exclusion set.
     pub fn exclude(&self) -> &ExcludeSet {
         &self.inner.exclude
+    }
+
+    /// Named retrieval scopes defined for this vault.
+    pub fn scopes(&self) -> &ScopeSet {
+        &self.inner.scopes
+    }
+
+    /// The scope a query falls back to when it names none, if one is set.
+    pub fn default_scope(&self) -> Option<&str> {
+        self.inner.default_scope.as_deref()
+    }
+
+    /// Resolve a requested scope name into the one actually applied.
+    ///
+    /// An explicit name always wins, including `all` — that is how a caller
+    /// deliberately reaches past a configured default.
+    pub fn effective_scope<'a>(&'a self, requested: Option<&'a str>) -> &'a str {
+        requested
+            .or(self.inner.default_scope.as_deref())
+            .unwrap_or(scope::ALL_SCOPE)
+    }
+
+    /// How many indexed notes a scope currently covers.
+    ///
+    /// An undefined name counts zero rather than erroring: this feeds a
+    /// diagnostic listing, which iterates the names the set itself reports.
+    pub fn scope_note_count(&self, name: &str) -> usize {
+        let index = self.read_index();
+        if name == scope::ALL_SCOPE {
+            return index.notes().len();
+        }
+        index
+            .notes()
+            .keys()
+            .filter(|path| self.inner.scopes.contains(name, path))
+            .count()
+    }
+
+    /// The indexed notes a scope admits, ready to hand to the embedding store.
+    ///
+    /// Every semantic entry point funnels through here, so a scope cannot be
+    /// honoured on one path and forgotten on another.
+    #[cfg(has_embeddings)]
+    pub(crate) fn scoped_paths(
+        &self,
+        requested: Option<&str>,
+    ) -> VaultResult<std::collections::HashSet<PathBuf>> {
+        let indexed = self
+            .read_index()
+            .notes()
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        self.inner
+            .scopes
+            .narrow(self.effective_scope(requested), indexed)
     }
 
     /// Access the Tantivy BM25 index (if enabled via `Config::tantivy`).
@@ -526,8 +617,23 @@ impl Vault {
     /// similarity.
     #[cfg(has_embeddings)]
     pub fn search_semantic(&self, query: &str, top_k: usize) -> VaultResult<Vec<(PathBuf, f32)>> {
+        self.search_semantic_scoped(query, top_k, None)
+    }
+
+    /// As [`Self::search_semantic`], restricted to a named scope.
+    ///
+    /// `None` applies the configured default scope, if any. An unknown name is
+    /// rejected — never widened to the whole vault, which would answer a
+    /// narrower question than the caller asked without saying so.
+    #[cfg(has_embeddings)]
+    pub fn search_semantic_scoped(
+        &self,
+        query: &str,
+        top_k: usize,
+        scope: Option<&str>,
+    ) -> VaultResult<Vec<(PathBuf, f32)>> {
         Ok(self
-            .search_semantic_detailed(query, top_k)?
+            .search_semantic_detailed(query, top_k, scope)?
             .into_iter()
             .map(|(path, score, _)| (path, score))
             .collect())
@@ -546,17 +652,13 @@ impl Vault {
         &self,
         query: &str,
         top_k: usize,
+        scope: Option<&str>,
     ) -> VaultResult<Vec<(PathBuf, f32, Option<embeddings::NoteMatch>)>> {
         let runtime = self.inner.embedding_runtime.as_ref().ok_or_else(|| {
             VaultError::Embedding("embeddings not enabled (OBSIDIAN_EMBEDDINGS=false)".into())
         })?;
         let snapshot = runtime.query_snapshot()?;
-        let current_paths = self
-            .read_index()
-            .notes()
-            .keys()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
+        let current_paths = self.scoped_paths(scope)?;
         let weight = embeddings::lexical_weight();
         if weight <= 0.0 {
             // Default path. Untouched by the experimental hybrid setting.
@@ -584,21 +686,18 @@ impl Vault {
         &self,
         path: &Path,
         top_k: usize,
+        scope: Option<&str>,
     ) -> VaultResult<Vec<(PathBuf, f32, Option<embeddings::NoteMatch>)>> {
         let runtime = self.inner.embedding_runtime.as_ref().ok_or_else(|| {
             VaultError::Embedding("embeddings not enabled (OBSIDIAN_EMBEDDINGS=false)".into())
         })?;
         let snapshot = runtime.query_snapshot()?;
-        let current_paths = self
-            .read_index()
-            .notes()
-            .keys()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        // Overfetch: the store can still hold vectors for notes deleted since
-        // the last reconcile, and those must not consume result slots.
+        let current_paths = self.scoped_paths(scope)?;
+        // The candidate set is the scope, so deleted-but-still-cached notes
+        // and out-of-scope notes are both gone before ranking rather than
+        // filtered out of the results afterwards.
         let hits = snapshot
-            .related_to(path, top_k.saturating_mul(2).max(top_k))
+            .related_to(path, top_k, Some(&current_paths))
             .ok_or_else(|| {
                 VaultError::Embedding(format!(
                     "{} has no embeddings yet (not indexed, or not in this vault)",
@@ -607,8 +706,6 @@ impl Vault {
             })?;
         Ok(hits
             .into_iter()
-            .filter(|(candidate, _)| current_paths.contains(candidate))
-            .take(top_k)
             .map(|(candidate, matched)| (candidate, matched.score, Some(matched)))
             .collect())
     }
@@ -730,9 +827,34 @@ impl Vault {
         prefetch_count: usize,
         alpha: f32,
     ) -> VaultResult<Vec<(PathBuf, f32)>> {
+        self.search_hybrid_scoped(query, top_k, prefetch_count, alpha, None)
+    }
+
+    /// As [`Self::search_hybrid`], restricted to a named scope.
+    ///
+    /// Out-of-scope notes are dropped from the BM25 candidate list before
+    /// normalisation, so they neither occupy result slots nor stretch the
+    /// min-max range the lexical arm is calibrated against.
+    ///
+    /// Unlike the pure semantic path, this is **not** equivalent to running a
+    /// separate index over the scope: BM25's idf is computed across the whole
+    /// corpus either way, so a term's weight still reflects the full vault.
+    /// The ranking is scoped; the term statistics behind it are not.
+    #[cfg(has_embeddings)]
+    pub fn search_hybrid_scoped(
+        &self,
+        query: &str,
+        top_k: usize,
+        prefetch_count: usize,
+        alpha: f32,
+        scope: Option<&str>,
+    ) -> VaultResult<Vec<(PathBuf, f32)>> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
+
+        let scope_name = self.effective_scope(scope);
+        self.inner.scopes.require(scope_name)?;
 
         let tv = self.inner.tantivy.as_ref().ok_or_else(|| {
             VaultError::Other("hybrid search requires Tantivy (set OBSIDIAN_TANTIVY=true)".into())
@@ -742,8 +864,22 @@ impl Vault {
         })?;
         let snapshot = runtime.query_snapshot()?;
 
-        let prefetch = prefetch_count.max(top_k);
-        let bm25_hits = tv.search(query, prefetch)?;
+        let scoped = scope_name != scope::ALL_SCOPE;
+        // A scope discards candidates after BM25 has chosen them, so asking for
+        // the unscoped number would leave a small scope with almost nothing.
+        // Overfetching costs a longer Tantivy result list and nothing else.
+        let prefetch = if scoped {
+            prefetch_count
+                .max(top_k)
+                .saturating_mul(SCOPED_PREFETCH_FACTOR)
+                .min(MAX_SCOPED_PREFETCH)
+        } else {
+            prefetch_count.max(top_k)
+        };
+        let mut bm25_hits = tv.search(query, prefetch)?;
+        if scoped {
+            bm25_hits.retain(|(path, _)| self.inner.scopes.contains(scope_name, path));
+        }
         if bm25_hits.is_empty() {
             return Ok(Vec::new());
         }
@@ -1127,6 +1263,7 @@ mod tests {
             tool_filter: crate::config::ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         };
 
         let result = Vault::open(&config).await;
@@ -1918,6 +2055,7 @@ mod tests {
             tool_filter: crate::config::ToolFilter::Full,
             mcp_data_dir: None,
             exclude_patterns: vec![],
+            default_scope: None,
         };
 
         let vault = Vault::open(&config)
@@ -2018,9 +2156,155 @@ mod tests {
         );
     }
 
+    // ── retrieval scopes, end to end ───────────────────────────────────
+    //
+    // The unit tests in `vault::scope` prove the glob matcher. These prove the
+    // wiring: a `scopes` file on disk reaching the index, the configured
+    // default being applied, and an unknown name being refused rather than
+    // quietly widened to the whole vault.
+
+    /// A vault with two folders and a scopes file covering each plus their
+    /// union, mirroring the shape this fork was built for.
+    async fn scoped_vault(dir: &Path, default_scope: Option<&str>) -> Vault {
+        std::fs::create_dir_all(dir.join("Knowledge/Deep")).unwrap();
+        std::fs::create_dir_all(dir.join("Agent")).unwrap();
+        std::fs::create_dir_all(dir.join("Loose")).unwrap();
+        std::fs::write(dir.join("Knowledge/one.md"), "# One").unwrap();
+        std::fs::write(dir.join("Knowledge/Deep/two.md"), "# Two").unwrap();
+        std::fs::write(dir.join("Agent/journal.md"), "# Journal").unwrap();
+        std::fs::write(dir.join("Loose/stray.md"), "# Stray").unwrap();
+
+        let mcp_home = dir.join(".obsidian-mcp");
+        std::fs::create_dir_all(&mcp_home).unwrap();
+        std::fs::write(
+            mcp_home.join("scopes"),
+            "[knowledge]\nKnowledge/\n\n[agent]\nAgent/\n\n[both]\n+knowledge\n+agent\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            default_scope: default_scope.map(str::to_string),
+            ..test_config(dir)
+        };
+        Vault::open(&config).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn scopes_file_on_disk_reaches_the_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), None).await;
+
+        assert_eq!(vault.scopes().names(), vec!["agent", "both", "knowledge"]);
+        assert_eq!(
+            vault.scopes().patterns("both").unwrap(),
+            &["Agent/**", "Knowledge/**"]
+        );
+    }
+
+    #[tokio::test]
+    async fn each_scope_counts_only_its_own_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), None).await;
+
+        assert_eq!(vault.scope_note_count("knowledge"), 2);
+        assert_eq!(vault.scope_note_count("agent"), 1);
+        assert_eq!(vault.scope_note_count("both"), 3);
+        // `all` is wider than the union: the loose note belongs to neither.
+        assert_eq!(vault.scope_note_count(scope::ALL_SCOPE), 4);
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
+    async fn scoped_paths_narrows_the_candidate_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), None).await;
+
+        let knowledge = vault.scoped_paths(Some("knowledge")).unwrap();
+        assert_eq!(knowledge.len(), 2);
+        assert!(knowledge.contains(&PathBuf::from("Knowledge/one.md")));
+        assert!(knowledge.contains(&PathBuf::from("Knowledge/Deep/two.md")));
+        assert!(!knowledge.contains(&PathBuf::from("Agent/journal.md")));
+
+        let both = vault.scoped_paths(Some("both")).unwrap();
+        assert_eq!(both.len(), 3);
+        assert!(both.contains(&PathBuf::from("Agent/journal.md")));
+        assert!(!both.contains(&PathBuf::from("Loose/stray.md")));
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
+    async fn no_scope_and_no_default_sees_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), None).await;
+
+        assert_eq!(vault.effective_scope(None), scope::ALL_SCOPE);
+        assert_eq!(vault.scoped_paths(None).unwrap().len(), 4);
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
+    async fn a_configured_default_applies_when_a_query_names_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), Some("knowledge")).await;
+
+        assert_eq!(vault.default_scope(), Some("knowledge"));
+        assert_eq!(vault.effective_scope(None), "knowledge");
+        assert_eq!(vault.scoped_paths(None).unwrap().len(), 2);
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
+    async fn an_explicit_scope_overrides_the_configured_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), Some("knowledge")).await;
+
+        // Including reaching past a narrow default back to the whole vault,
+        // which is the only way an agent can deliberately widen its view.
+        assert_eq!(vault.scoped_paths(Some("agent")).unwrap().len(), 1);
+        assert_eq!(vault.scoped_paths(Some(scope::ALL_SCOPE)).unwrap().len(), 4);
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
+    async fn an_unknown_scope_is_refused_rather_than_widened() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = scoped_vault(dir.path(), None).await;
+
+        let error = vault
+            .scoped_paths(Some("knowlege"))
+            .expect_err("a misspelt scope must not silently search everything");
+        assert!(matches!(error, VaultError::UnknownScope { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_default_scope_fails_at_startup_not_at_query_time() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_vault(dir.path());
+        let config = Config {
+            default_scope: Some("nonexistent".into()),
+            ..test_config(dir.path())
+        };
+
+        match Vault::open(&config).await {
+            Err(error) => assert!(matches!(error, VaultError::UnknownScope { .. }), "{error}"),
+            Ok(_) => panic!("a default scope naming nothing must stop the server"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vault_with_no_scopes_file_still_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_vault(dir.path());
+        let vault = Vault::open(&test_config(dir.path())).await.unwrap();
+
+        assert!(vault.scopes().is_empty());
+        assert_eq!(vault.effective_scope(None), scope::ALL_SCOPE);
+    }
+
     fn test_config_with_exclusions(vault_root: &Path, patterns: Vec<String>) -> Config {
         Config {
             exclude_patterns: patterns,
+            default_scope: None,
             ..test_config(vault_root)
         }
     }
@@ -2124,6 +2408,7 @@ mod tests {
         let config = Config {
             tantivy: true,
             exclude_patterns: vec!["Archive/**".into()],
+            default_scope: None,
             ..test_config(dir.path())
         };
         let vault = Vault::open(&config).await.unwrap();

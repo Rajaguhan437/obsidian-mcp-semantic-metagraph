@@ -72,6 +72,27 @@ pub async fn ensure_vault(
     })
 }
 
+/// Compile a caller's include globs, or `None` when it sent none.
+///
+/// A malformed glob is the caller's error, not a reason to widen the scope:
+/// silently dropping it would answer over more of the vault than was asked
+/// for, and the caller could not tell from the results.
+fn compile_scope(
+    globs: Option<&[String]>,
+) -> QueryResult<Option<crate::vault::exclude::ExcludeSet>> {
+    let Some(globs) = globs.filter(|patterns| !patterns.is_empty()) else {
+        return Ok(None);
+    };
+    crate::vault::exclude::ExcludeSet::build_strict(globs.to_vec())
+        .map(Some)
+        .map_err(|error| {
+            QueryError::new(
+                protocol::ERR_INVALID_PARAMS,
+                format!("invalid scope glob: {error}"),
+            )
+        })
+}
+
 pub async fn search_semantic(
     registry: &VaultRegistry,
     params: SearchSemanticParams,
@@ -80,6 +101,7 @@ pub async fn search_semantic(
     require_semantic_ready(&context)?;
     let top_k = params.top_k.unwrap_or(DEFAULT_TOP_K);
     let include_content = params.include_content.unwrap_or(false);
+    let scope = compile_scope(params.scope_globs.as_deref())?;
 
     // With embeddings compiled in, ask for the detailed form so each hit can
     // say which representation ranked it. Without them `require_semantic_ready`
@@ -87,7 +109,7 @@ pub async fn search_semantic(
     #[cfg(has_embeddings)]
     {
         let hits = context
-            .search_semantic_hits(&params.query, top_k)
+            .search_semantic_hits(&params.query, top_k, scope.as_ref())
             .map_err(map_vault_error)?;
 
         let matches: std::collections::HashMap<PathBuf, _> = hits
@@ -112,7 +134,7 @@ pub async fn search_semantic(
     #[cfg(not(has_embeddings))]
     {
         let scores = context
-            .search_semantic_scores(&params.query, top_k)
+            .search_semantic_scores(&params.query, top_k, scope.as_ref())
             .map_err(map_vault_error)?;
         build_hits(&context, scores, &params.query, include_content, |_, _| {
             HitProvenance::default()
@@ -161,10 +183,17 @@ pub async fn search_hybrid(
     let include_content = params.include_content.unwrap_or(false);
     let prefetch = params.prefetch.unwrap_or(DEFAULT_PREFETCH_COUNT).max(top_k);
     let alpha = params.alpha.unwrap_or(DEFAULT_ALPHA).clamp(0.0, 1.0);
+    let scope = compile_scope(params.scope_globs.as_deref())?;
 
-    let bm25_hits = context
+    let mut bm25_hits = context
         .search_bm25(&params.query, prefetch)
         .map_err(map_vault_error)?;
+    // The lexical arm is scoped by discarding out-of-scope candidates. Unlike
+    // the semantic arm this is not equivalent to a separate index: BM25's idf
+    // is computed over the whole corpus either way.
+    if let Some(scope) = scope.as_ref().filter(|set| !set.is_empty()) {
+        bm25_hits.retain(|(path, _)| scope.is_excluded(path));
+    }
     if bm25_hits.is_empty() {
         return Ok(SearchResult {
             results: Vec::new(),

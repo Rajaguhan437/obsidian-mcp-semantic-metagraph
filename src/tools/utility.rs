@@ -26,6 +26,24 @@ pub struct VaultInfo {
     pub exclude_patterns: Vec<String>,
     /// Resolved external data directory, or `null` when using default (vault-root `.obsidian-mcp/`).
     pub mcp_data_dir: Option<String>,
+    /// Retrieval scopes defined for this vault. Pass one of these names as
+    /// `scope` to `search_semantic` or `note_related` to search only that
+    /// slice. The implicit scope `all` is always available and is not listed.
+    pub scopes: Vec<ScopeInfo>,
+    /// The scope applied when a query names none. `null` means every indexed
+    /// note.
+    pub default_scope: Option<String>,
+}
+
+/// One named slice of the vault, as the agent needs to see it: the name to
+/// pass, what it covers, and how many notes are actually in it right now.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ScopeInfo {
+    pub name: String,
+    /// Indexed notes currently inside this scope.
+    pub notes: usize,
+    /// The include globs that define it.
+    pub patterns: Vec<String>,
 }
 
 /// Return aggregate vault statistics.
@@ -34,6 +52,18 @@ pub async fn vault_info(
     _params: VaultInfoParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let stats = vault.vault_stats()?;
+    // Counted against the live index rather than stored, so a scope that has
+    // stopped matching anything reports zero instead of a stale number.
+    let scopes = vault
+        .scopes()
+        .names()
+        .into_iter()
+        .map(|name| ScopeInfo {
+            notes: vault.scope_note_count(name),
+            patterns: vault.scopes().patterns(name).unwrap_or(&[]).to_vec(),
+            name: name.to_string(),
+        })
+        .collect();
     let mcp_data_dir = if vault.mcp_data() != vault.mcp_home() {
         Some(vault.mcp_data().display().to_string())
     } else {
@@ -49,6 +79,8 @@ pub async fn vault_info(
         vault_path: vault.root().display().to_string(),
         exclude_patterns: vault.exclude().patterns().to_vec(),
         mcp_data_dir,
+        scopes,
+        default_scope: vault.default_scope().map(str::to_string),
     };
     let json = serde_json::to_string_pretty(&info).map_err(|e| VaultError::Other(e.to_string()))?;
     Ok(CallToolResult::success(vec![Content::text(json)]))

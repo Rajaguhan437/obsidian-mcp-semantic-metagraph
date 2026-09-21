@@ -55,6 +55,9 @@ pub enum VaultError {
     #[error("Embedding error: {0}")]
     Embedding(String),
 
+    #[error("Unknown scope '{name}'. Defined scopes: {known}")]
+    UnknownScope { name: String, known: String },
+
     #[error("Daemon IPC error: {0}")]
     DaemonIpc(String),
 
@@ -94,7 +97,8 @@ impl From<VaultError> for rmcp::ErrorData {
             | VaultError::AlreadyExists(_)
             | VaultError::InvalidFrontmatter { .. }
             | VaultError::PatchTargetNotFound { .. }
-            | VaultError::InvalidRegex { .. } => ErrorCode::INVALID_PARAMS,
+            | VaultError::InvalidRegex { .. }
+            | VaultError::UnknownScope { .. } => ErrorCode::INVALID_PARAMS,
             VaultError::FrontmatterParse { .. } => ErrorCode::PARSE_ERROR,
             VaultError::Io(_)
             | VaultError::Watcher(_)

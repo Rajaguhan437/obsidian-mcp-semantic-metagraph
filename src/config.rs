@@ -78,6 +78,13 @@ pub struct Config {
     pub mcp_data_dir: Option<PathBuf>,
     /// Raw exclusion patterns from `OBSIDIAN_EXCLUDE_PATHS` env var (comma-separated).
     pub exclude_patterns: Vec<String>,
+    /// Scope applied to semantic search when a query names none
+    /// (`OBSIDIAN_DEFAULT_SCOPE`). `None` means every indexed note.
+    ///
+    /// This exists so that widening the index does not silently widen the
+    /// answers: a folder can join the index as its own scope while unscoped
+    /// queries keep returning exactly what they returned before.
+    pub default_scope: Option<String>,
 }
 
 // ── Tool Filtering ─────────────────────────────────────────────────
@@ -410,6 +417,11 @@ impl Config {
 
         let mcp_data_dir = normalize_optional_path_env("OBSIDIAN_MCP_DATA");
 
+        let default_scope = std::env::var("OBSIDIAN_DEFAULT_SCOPE")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|name| !name.is_empty());
+
         let exclude_patterns: Vec<String> = std::env::var("OBSIDIAN_EXCLUDE_PATHS")
             .unwrap_or_default()
             .split(',')
@@ -432,6 +444,7 @@ impl Config {
             tool_filter,
             mcp_data_dir,
             exclude_patterns,
+            default_scope,
         })
     }
 }

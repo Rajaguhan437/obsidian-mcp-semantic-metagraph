@@ -311,6 +311,13 @@ pub struct SearchSemanticParams {
     /// Overrides the `OBSIDIAN_HYBRID_ALPHA` env var for this query. Range: 0.0–1.0, default: 0.25.
     #[serde(default)]
     pub alpha: Option<f32>,
+    /// Which slice of the vault to search. `vault_info` lists the scope names
+    /// defined for this vault; `"all"` always means every indexed note.
+    ///
+    /// Omit it to use the vault's configured default scope. An unrecognised
+    /// name is an error, never a silent search of everything.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Envelope for semantic results.
@@ -414,6 +421,12 @@ pub async fn search_semantic(
     let lexical_prefetch = params.lexical_prefetch.unwrap_or(false);
     let alpha = params.alpha.unwrap_or(default_alpha).clamp(0.0, 1.0);
 
+    // Resolved once, here, so both backends narrow by the same thing and a bad
+    // name fails before any work is done rather than differently per backend.
+    let scope = vault.effective_scope(params.scope.as_deref());
+    vault.scopes().require(scope)?;
+    let scope_globs = vault.scopes().patterns(scope).map(<[String]>::to_vec);
+
     let results = match runtime.mode {
         SemanticMode::Daemon => {
             search_semantic_daemon(
@@ -424,6 +437,7 @@ pub async fn search_semantic(
                 lexical_prefetch,
                 alpha,
                 runtime,
+                scope_globs.clone(),
             )
             .await
         }
@@ -434,6 +448,7 @@ pub async fn search_semantic(
             include_content,
             lexical_prefetch,
             alpha,
+            Some(scope),
         ),
         SemanticMode::Auto => match search_semantic_daemon(
             vault,
@@ -443,6 +458,7 @@ pub async fn search_semantic(
             lexical_prefetch,
             alpha,
             runtime,
+            scope_globs.clone(),
         )
         .await
         {
@@ -459,6 +475,7 @@ pub async fn search_semantic(
                     include_content,
                     lexical_prefetch,
                     alpha,
+                    Some(scope),
                 )
             }
             Err(err) => Err(err),
@@ -484,6 +501,9 @@ fn semantic_candidate_limit(top_k: usize) -> usize {
     }
 }
 
+// Every argument is a distinct query knob that both backends must receive
+// identically; bundling them into a struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 async fn search_semantic_daemon(
     vault: &Vault,
     params: &SearchSemanticParams,
@@ -492,6 +512,7 @@ async fn search_semantic_daemon(
     lexical_prefetch: bool,
     alpha: f32,
     runtime: &SemanticRuntime,
+    scope_globs: Option<Vec<String>>,
 ) -> Result<Vec<SemanticSearchResult>, VaultError> {
     let Some(client) = runtime.daemon_client.as_ref() else {
         let reason = runtime
@@ -526,6 +547,7 @@ async fn search_semantic_daemon(
                 prefetch_count,
                 alpha,
                 include_content,
+                scope_globs,
             )
             .await?
     } else {
@@ -535,6 +557,7 @@ async fn search_semantic_daemon(
                 &params.query,
                 candidate_limit,
                 include_content,
+                scope_globs,
             )
             .await?
     };
@@ -643,6 +666,7 @@ fn search_semantic_local(
     include_content: bool,
     lexical_prefetch: bool,
     alpha: f32,
+    scope: Option<&str>,
 ) -> Result<Vec<SemanticSearchResult>, VaultError> {
     let candidate_limit = semantic_candidate_limit(top_k);
     let hits: Vec<(
@@ -651,17 +675,18 @@ fn search_semantic_local(
         Option<crate::vault::embeddings::NoteMatch>,
     )> = if lexical_prefetch {
         vault
-            .search_hybrid(
+            .search_hybrid_scoped(
                 query,
                 candidate_limit,
                 DEFAULT_PREFETCH_COUNT.max(candidate_limit),
                 alpha,
+                scope,
             )?
             .into_iter()
             .map(|(path, score)| (path, score, None))
             .collect()
     } else {
-        vault.search_semantic_detailed(query, candidate_limit)?
+        vault.search_semantic_detailed(query, candidate_limit, scope)?
     };
 
     let word_re = if !include_content {
@@ -734,6 +759,7 @@ fn search_semantic_local(
     _include_content: bool,
     _lexical_prefetch: bool,
     _alpha: f32,
+    _scope: Option<&str>,
 ) -> Result<Vec<SemanticSearchResult>, VaultError> {
     Err(VaultError::Embedding(
         "Semantic search is not available. Rebuild with --features embeddings or --features embeddings-api".to_string(),
@@ -1767,6 +1793,7 @@ mod tests {
                 include_content: Some(false),
                 lexical_prefetch: Some(false),
                 alpha: None,
+                scope: None,
             },
             0.25,
             &runtime,
@@ -1812,6 +1839,7 @@ mod tests {
                 include_content: Some(false),
                 lexical_prefetch: Some(false),
                 alpha: None,
+                scope: None,
             },
             0.25,
             &runtime,
@@ -1859,6 +1887,7 @@ mod tests {
                 include_content: Some(false),
                 lexical_prefetch: Some(false),
                 alpha: None,
+                scope: None,
             },
             0.25,
             &runtime,
@@ -1917,6 +1946,7 @@ mod tests {
                 include_content: Some(false),
                 lexical_prefetch: Some(false),
                 alpha: None,
+                scope: None,
             },
             0.25,
             &runtime,

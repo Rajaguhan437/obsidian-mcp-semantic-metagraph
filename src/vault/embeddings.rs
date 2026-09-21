@@ -617,10 +617,15 @@ impl EmbeddingStore {
     ///
     /// Returns `None` when the note has no vectors at all - not yet indexed, or
     /// not in the vault.
+    ///
+    /// `allowed` restricts the CANDIDATES, not the results. Filtering after the
+    /// fact would let notes outside the scope consume the top-k slots and
+    /// return a short list that looks like a shortage of related notes.
     pub(crate) fn related_to(
         &self,
         note: &Path,
         top_k: usize,
+        allowed: Option<&HashSet<PathBuf>>,
     ) -> Option<Vec<(PathBuf, NoteMatch)>> {
         let seed = self
             .embeddings
@@ -629,7 +634,7 @@ impl EmbeddingStore {
             .or_else(|| self.embeddings.get(note))?
             .vector
             .clone();
-        let mut scored = self.collapse_to_notes(&seed, None);
+        let mut scored = self.collapse_to_notes(&seed, allowed);
         // A note is always its own nearest neighbour; that is not a finding.
         scored.retain(|(candidate, _)| candidate.as_path() != note);
         Some(Self::rank_detailed(scored, top_k))
@@ -2204,7 +2209,7 @@ mod tests {
             .insert_hashed(chunk_key(&far, 0), [0u8; 32], vec![0.0, 0.0, 1.0])
             .unwrap();
 
-        let hits = store.related_to(&seed, 10).expect("seed is indexed");
+        let hits = store.related_to(&seed, 10, None).expect("seed is indexed");
         let paths: Vec<&PathBuf> = hits.iter().map(|(p, _)| p).collect();
         assert!(
             !paths.contains(&&seed),
@@ -2230,7 +2235,7 @@ mod tests {
             .unwrap();
 
         let hits = store
-            .related_to(&seed, 10)
+            .related_to(&seed, 10, None)
             .expect("chunk 0 is a valid seed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, other);
@@ -2248,7 +2253,11 @@ mod tests {
                 vec![1.0, 0.0],
             )
             .unwrap();
-        assert!(store.related_to(&PathBuf::from("absent.md"), 5).is_none());
+        assert!(
+            store
+                .related_to(&PathBuf::from("absent.md"), 5, None)
+                .is_none()
+        );
     }
 
     /// A chunk key must resolve back to its index, and a summary key must not
