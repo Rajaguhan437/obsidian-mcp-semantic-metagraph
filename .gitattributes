@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# Batch files must keep CRLF: cmd.exe mis-parses multi-line if/else blocks
+# in an LF-only script, and the repo-wide eol=lf above would strip them.
+*.cmd text eol=crlf

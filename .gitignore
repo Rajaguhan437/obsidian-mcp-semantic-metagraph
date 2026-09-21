@@ -11,9 +11,5 @@ bench-out/
 __pycache__/
 *.pyc
 
-# Local launcher: holds a machine-specific vault path.
-# run-spartan.example.cmd is the committed template.
-run-spartan.cmd
-
 # Generated code map from the `base` CLI.
 .base-ast/
